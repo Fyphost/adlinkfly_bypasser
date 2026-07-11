@@ -327,14 +327,53 @@ def _is_asset_url(url: str) -> bool:
     return any(marker in low for marker in _ASSET_URL_MARKERS)
 
 
+# Terabox-family hosts and the markers that make a Terabox URL a real *share*
+# link (as opposed to the homepage or a preview asset).
+_TERABOX_SUBSTRINGS = (
+    "terabox", "1024tera", "teraboxapp", "teraboxlink", "terafileshare",
+    "terasharelink", "freeterabox", "teraboxdrive", "nephobox", "4funbox",
+    "mirrobox", "momerybox", "tibibox", "gibibox",
+)
+_TERABOX_SHARE_MARKERS = ("/s/", "surl=", "/sharing")
+# Google Drive/Docs URLs are only real files when they carry a file/folder id;
+# the bare viewer app (drive.google.com/viewer…) is not a destination.
+_GOOGLE_ID_MARKERS = (
+    "/file/d/", "/folders/", "/document/d/", "/spreadsheets/d/",
+    "/presentation/d/", "/forms/d/", "open?id=", "/uc?", "id=",
+)
+
+
+def _valid_final_url(url: str) -> bool:
+    """Host-specific validation that a file-host URL is a *real* destination
+    (not a homepage, viewer app, or embedded widget)."""
+    low = url.lower()
+    host = _host_of(low)
+    if "google.com" in host or "google." in host:
+        if "/viewer" in low:  # drive.google.com/viewer(ng) app - not a file
+            return False
+        return any(m in low for m in _GOOGLE_ID_MARKERS)
+    if any(t in host for t in _TERABOX_SUBSTRINGS):
+        return any(m in low for m in _TERABOX_SHARE_MARKERS)
+    return True
+
+
+def is_final_link(url: str) -> bool:
+    """True if *url* is a genuine final destination link (file-host, valid,
+    and not a thumbnail/preview/viewer asset)."""
+    if not url or not is_final_host(url) or _is_asset_url(url):
+        return False
+    return _valid_final_url(url)
+
+
 def find_final_link(html: str) -> Optional[str]:
-    """Find the best URL in *html* that points at a final file-host.
+    """Find the best URL in *html* that points at a real final destination.
 
     - HTML entities are decoded (so ``&amp;`` becomes ``&``).
     - Thumbnail / preview / static-asset URLs are rejected (a Terabox preview
       image on ``dm-data.1024tera.com`` is not the shareable link).
-    - A genuine *share* link (``/s/``, ``/sharing/``, ``surl=`` …) is preferred
-      over any other file-host URL.
+    - Host-specific validation rejects non-file URLs such as the Google Drive
+      viewer app (``drive.google.com/viewer/main``) or a bare Terabox homepage.
+    - A genuine *share* link (``/s/``, ``/sharing/``, ``surl=`` …) is preferred.
 
     Returns the chosen URL or ``None``.
     """
@@ -344,7 +383,7 @@ def find_final_link(html: str) -> Optional[str]:
     matches: List[str] = []
     for m in _URL_RE.finditer(text):
         candidate = m.group(0).rstrip(".,;\"')")
-        if not is_final_host(candidate) or _is_asset_url(candidate):
+        if not is_final_link(candidate):
             continue
         if candidate not in matches:
             matches.append(candidate)

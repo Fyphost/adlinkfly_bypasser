@@ -337,6 +337,25 @@ def test_find_final_link():
     print("PASS test_find_final_link")
 
 
+def test_is_final_link_validation():
+    from adlinkfly_bypasser import html_utils
+
+    # Google Drive viewer app / bare homepage are NOT real destinations.
+    assert not html_utils.is_final_link("https://drive.google.com/viewer/main")
+    assert not html_utils.is_final_link("https://drive.google.com/")
+    # Real Drive file / uc download links are.
+    assert html_utils.is_final_link("https://drive.google.com/file/d/ABC123/view")
+    assert html_utils.is_final_link("https://drive.google.com/uc?export=download&id=ABC")
+    # Terabox must be an actual share link, not the homepage.
+    assert not html_utils.is_final_link("https://www.terabox.com/")
+    assert html_utils.is_final_link("https://www.terabox.com/s/1abc")
+    # find_final_link skips the viewer embed and returns the real file link.
+    html = ('<iframe src="https://drive.google.com/viewer/main"></iframe>'
+            '<a href="https://drive.google.com/file/d/REAL123/view">Get</a>')
+    assert html_utils.find_final_link(html) == "https://drive.google.com/file/d/REAL123/view"
+    print("PASS test_is_final_link_validation")
+
+
 def test_choose_continue():
     from adlinkfly_bypasser import html_utils
 
@@ -766,6 +785,7 @@ if __name__ == "__main__":
     test_cf_clearance_cookie_escape_hatch()
     test_solver_disabled_by_default()
     test_is_final_host()
+    test_is_final_link_validation()
     test_find_final_link()
     test_choose_continue()
     test_choose_continue_exclude_and_reveal()

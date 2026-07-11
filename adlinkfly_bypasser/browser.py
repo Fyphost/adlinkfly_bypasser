@@ -623,7 +623,7 @@ class BrowserSolver:
                 self._log("  controls: %s", self._labels(adapter))
 
             # Already on the final file link?
-            if html_utils.is_final_host(cur):
+            if html_utils.is_final_link(cur):
                 self._log("Reached final file-host in the address bar")
                 return self._capture(adapter, adapter.page_html(), final=cur,
                                      cleared=cleared, reached=True, ended="final_link")
@@ -709,7 +709,7 @@ class BrowserSolver:
         cur = adapter.current_url()
         final = html_utils.find_final_link(page_html)
         reached = bool(final)
-        if not final and html_utils.is_final_host(cur):
+        if not final and html_utils.is_final_link(cur):
             final, reached = cur, True
         return self._capture(adapter, page_html, final=final, cleared=cleared,
                              reached=reached, ended="final_link" if reached else ended)
@@ -760,7 +760,7 @@ class BrowserSolver:
             final = html_utils.find_final_link(adapter.page_html() or "")
             if final:
                 return final
-            if html_utils.is_final_host(adapter.current_url()):
+            if html_utils.is_final_link(adapter.current_url()):
                 return adapter.current_url()
             time.sleep(self.poll)
         return None
@@ -773,7 +773,7 @@ class BrowserSolver:
         deadline = time.time() + timeout
         while time.time() < deadline:
             cur = adapter.current_url()
-            if html_utils.is_final_host(cur):
+            if html_utils.is_final_link(cur):
                 return cur, True
             page_html = adapter.page_html() or ""
             final = html_utils.find_final_link(page_html)

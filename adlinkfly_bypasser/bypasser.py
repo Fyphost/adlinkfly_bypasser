@@ -321,7 +321,7 @@ class AdlinkflyBypasser:
         html = getattr(result, "html", "") or ""
 
         # 1) Reached a real file-host / cloud-drive link -> done.
-        if final and (reached or html_utils.is_final_host(final)):
+        if final and (reached or html_utils.is_final_link(final)):
             trail.append(final)
             return BypassResult(source, final, step, "browser_walk", trail)
 
