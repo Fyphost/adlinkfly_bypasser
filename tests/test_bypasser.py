@@ -268,6 +268,44 @@ def test_solver_disabled_by_default():
         server.shutdown()
 
 
+def test_find_browser_binary_env(tmp_path=None):
+    import os
+    import stat
+    import tempfile
+
+    from adlinkfly_bypasser import find_browser_binary
+
+    # Create a fake executable and point CHROME_BIN at it.
+    d = tempfile.mkdtemp()
+    fake = os.path.join(d, "chrome")
+    with open(fake, "w") as fh:
+        fh.write("#!/bin/sh\n")
+    os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+
+    old = os.environ.get("CHROME_BIN")
+    try:
+        os.environ["CHROME_BIN"] = fake
+        assert find_browser_binary() == fake
+    finally:
+        if old is None:
+            os.environ.pop("CHROME_BIN", None)
+        else:
+            os.environ["CHROME_BIN"] = old
+    print("PASS test_find_browser_binary_env")
+
+
+def test_browser_path_threads_to_solver():
+    # AdlinkflyBypasser should forward browser_path / xvfb to the solver it
+    # builds. We can't build a real BrowserSolver without a driver installed,
+    # so just verify the attributes are stored for the factory to use.
+    bp = AdlinkflyBypasser(
+        solver="browser", browser_path="/tmp/chrome", xvfb=True, headless=True
+    )
+    assert bp.browser_path == "/tmp/chrome"
+    assert bp.xvfb is True
+    print("PASS test_browser_path_threads_to_solver")
+
+
 def test_detect_cloudflare_unit():
     from adlinkfly_bypasser import html_utils
 
@@ -316,6 +354,8 @@ if __name__ == "__main__":
     test_cloudflare_challenge_raises()
     test_cf_clearance_cookie_escape_hatch()
     test_solver_disabled_by_default()
+    test_find_browser_binary_env()
+    test_browser_path_threads_to_solver()
     test_browser_backend_selection_without_libs()
     test_browser_solver_clears_cloudflare_end_to_end()
     test_browser_solver_that_fails_raises()

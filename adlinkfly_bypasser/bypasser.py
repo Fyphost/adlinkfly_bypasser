@@ -98,6 +98,8 @@ class AdlinkflyBypasser:
         headers: Optional[dict] = None,
         solver: object = "none",
         headless: bool = True,
+        browser_path: Optional[str] = None,
+        xvfb: bool = False,
         verbose: bool = False,
     ):
         self.wait = wait
@@ -105,6 +107,8 @@ class AdlinkflyBypasser:
         self.verbose = verbose
         self.user_agent = user_agent
         self.headless = headless
+        self.browser_path = browser_path
+        self.xvfb = xvfb
         # solver: "none" | "browser" | "auto" | a browser backend name | an
         # object exposing .solve(url) -> SolveResult (for custom/test solvers).
         self.solver_spec = solver
@@ -211,6 +215,8 @@ class AdlinkflyBypasser:
             backend=backend,
             headless=self.headless,
             user_agent=self.user_agent,
+            browser_path=self.browser_path,
+            xvfb=self.xvfb,
             verbose=self.verbose,
         )
         return self._solver

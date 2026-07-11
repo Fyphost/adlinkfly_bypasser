@@ -31,11 +31,14 @@ package stays dependency-free.
 
 from __future__ import annotations
 
+import glob
 import importlib.util
 import logging
+import os
+import shutil
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from . import html_utils
 from .exceptions import AdlinkflyBypassError
@@ -44,6 +47,65 @@ logger = logging.getLogger("adlinkfly_bypasser.browser")
 
 # Auto-selection order.
 _BACKENDS = ("drissionpage", "seleniumbase", "undetected", "playwright")
+
+# Executable names looked up on PATH.
+_CHROME_ON_PATH = (
+    "google-chrome-stable",
+    "google-chrome",
+    "chromium",
+    "chromium-browser",
+    "chrome",
+    "brave-browser",
+)
+
+# Absolute paths / globs to probe for a Chromium-family binary, including
+# browsers downloaded by Playwright.
+_CHROME_PATH_GLOBS = (
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/snap/bin/chromium",
+    "/opt/google/chrome/chrome",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    # Playwright-managed full Chromium (headed-capable).
+    "~/.cache/ms-playwright/chromium-*/chrome-linux/chrome",
+    "~/.cache/ms-playwright/chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+    # Playwright headless-shell (headless only) - last resort.
+    "~/.cache/ms-playwright/chromium_headless_shell-*/chrome-linux/headless_shell",
+    "~/.cache/ms-playwright/chromium_headless_shell-*/chrome-linux*/headless_shell",
+)
+
+
+def find_browser_binary() -> Optional[str]:
+    """Best-effort search for an installed Chromium-family browser binary.
+
+    Checks ``$CHROME_BIN`` / ``$CHROME_PATH``, then PATH, then common install
+    locations (including Playwright's downloaded browsers). Returns the path or
+    ``None``.
+    """
+    for env in ("CHROME_BIN", "CHROME_PATH", "CHROMIUM_PATH"):
+        val = os.environ.get(env)
+        if val and os.path.exists(val):
+            return val
+
+    for name in _CHROME_ON_PATH:
+        found = shutil.which(name)
+        if found:
+            return found
+
+    candidates: List[str] = []
+    for pattern in _CHROME_PATH_GLOBS:
+        expanded = os.path.expanduser(pattern)
+        if any(ch in expanded for ch in "*?["):
+            candidates.extend(sorted(glob.glob(expanded), reverse=True))
+        elif os.path.exists(expanded):
+            candidates.append(expanded)
+    for path in candidates:
+        if os.path.exists(path) and os.access(path, os.X_OK):
+            return path
+    return None
 
 # Map backend name -> importable module used to detect availability.
 _BACKEND_MODULE = {
@@ -101,6 +163,14 @@ class BrowserSolver:
         settle) before capturing the page.
     user_agent:
         Optional User-Agent override for the browser.
+    browser_path:
+        Path to a Chrome/Chromium binary. If omitted, common locations (and
+        Playwright's downloaded browsers) are auto-detected.
+    xvfb:
+        On a display-less Linux server, run the browser under a virtual
+        display (Xvfb) so it can run *headed* - which clears Cloudflare far
+        more reliably than headless. Requires ``pyvirtualdisplay`` + the
+        ``Xvfb`` system package (SeleniumBase has native support).
     verbose:
         Log progress at INFO level.
     """
@@ -113,6 +183,8 @@ class BrowserSolver:
         poll: float = 2.0,
         settle: float = 3.0,
         user_agent: Optional[str] = None,
+        browser_path: Optional[str] = None,
+        xvfb: bool = False,
         verbose: bool = False,
     ):
         self.headless = headless
@@ -120,8 +192,14 @@ class BrowserSolver:
         self.poll = poll
         self.settle = settle
         self.user_agent = user_agent
+        self.xvfb = xvfb
         self.verbose = verbose
         self.backend = self._select(backend)
+        self.browser_path = browser_path or find_browser_binary()
+        if self.browser_path:
+            self._log("Using browser binary: %s", self.browser_path)
+        else:
+            self._log("No browser binary auto-detected; driver default will apply")
 
     def _select(self, backend: str) -> str:
         found = available_backends()
@@ -152,7 +230,34 @@ class BrowserSolver:
     def solve(self, url: str) -> SolveResult:
         """Load *url* in a browser and return the cleared page + credentials."""
         self._log("Browser solver (%s) opening %s", self.backend, url)
-        return getattr(self, f"_solve_{self.backend}")(url)
+        # SeleniumBase manages Xvfb itself; for the others we start one here.
+        display = None
+        if self.xvfb and self.backend != "seleniumbase":
+            display = self._start_virtual_display()
+        try:
+            return getattr(self, f"_solve_{self.backend}")(url)
+        finally:
+            if display is not None:
+                try:
+                    display.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _start_virtual_display(self):
+        try:
+            from pyvirtualdisplay import Display  # type: ignore
+        except Exception:  # noqa: BLE001
+            raise BrowserSolverError(
+                "xvfb requested but 'pyvirtualdisplay' is not installed. "
+                "Install it and the Xvfb system package, e.g.:  "
+                "pip install pyvirtualdisplay  &&  apt-get install -y xvfb"
+            )
+        self._log("Starting virtual display (Xvfb)")
+        display = Display(visible=False, size=(1920, 1080))
+        display.start()
+        # Running under Xvfb means we can (and should) run headed.
+        self.headless = False
+        return display
 
     # -- shared wait loop --------------------------------------------------
     def _wait_cleared(self, get_html):
@@ -185,6 +290,11 @@ class BrowserSolver:
         from DrissionPage import ChromiumOptions, ChromiumPage  # type: ignore
 
         co = ChromiumOptions()
+        if self.browser_path:
+            try:
+                co.set_browser_path(self.browser_path)
+            except Exception:  # noqa: BLE001
+                pass
         if self.headless:
             co.headless()
         if self.user_agent:
@@ -237,7 +347,13 @@ class BrowserSolver:
     def _solve_seleniumbase(self, url: str) -> SolveResult:
         from seleniumbase import Driver  # type: ignore
 
-        driver = Driver(uc=True, headless=self.headless, agent=self.user_agent)
+        driver_kwargs = {"uc": True, "headless": self.headless, "agent": self.user_agent}
+        if self.xvfb:
+            driver_kwargs["xvfb"] = True
+            driver_kwargs["headless"] = False  # headed under Xvfb
+        if self.browser_path:
+            driver_kwargs["binary_location"] = self.browser_path
+        driver = Driver(**driver_kwargs)
         try:
             # uc_open_with_reconnect helps get past the initial challenge.
             try:
@@ -276,7 +392,10 @@ class BrowserSolver:
         if self.user_agent:
             options.add_argument(f"--user-agent={self.user_agent}")
 
-        driver = uc.Chrome(options=options)
+        uc_kwargs = {"options": options}
+        if self.browser_path:
+            uc_kwargs["browser_executable_path"] = self.browser_path
+        driver = uc.Chrome(**uc_kwargs)
         try:
             driver.get(url)
             html, cleared = self._wait_cleared(lambda: driver.page_source)
@@ -297,7 +416,10 @@ class BrowserSolver:
         from playwright.sync_api import sync_playwright  # type: ignore
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=self.headless)
+            launch_kwargs = {"headless": self.headless}
+            if self.browser_path:
+                launch_kwargs["executable_path"] = self.browser_path
+            browser = p.chromium.launch(**launch_kwargs)
             ctx_kwargs = {}
             if self.user_agent:
                 ctx_kwargs["user_agent"] = self.user_agent

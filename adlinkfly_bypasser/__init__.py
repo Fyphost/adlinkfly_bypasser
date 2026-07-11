@@ -29,6 +29,7 @@ from .browser import (
     BrowserSolverError,
     SolveResult,
     available_backends,
+    find_browser_binary,
 )
 from .bypasser import AdlinkflyBypasser, BypassResult, bypass
 from .exceptions import (
@@ -48,6 +49,7 @@ __all__ = [
     "SolveResult",
     "BrowserSolverError",
     "available_backends",
+    "find_browser_binary",
     "AdlinkflyBypassError",
     "CloudflareChallengeError",
     "NetworkError",
@@ -56,4 +58,4 @@ __all__ = [
     "UnsupportedURLError",
 ]
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"

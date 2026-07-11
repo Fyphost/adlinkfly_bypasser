@@ -76,6 +76,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "clear Cloudflare than headless).",
     )
     parser.add_argument(
+        "--browser-path",
+        default=None,
+        metavar="PATH",
+        help="Path to a Chrome/Chromium binary for the browser solver. "
+        "Auto-detected if omitted (checks PATH, common locations, and "
+        "Playwright's downloaded browsers).",
+    )
+    parser.add_argument(
+        "--xvfb",
+        action="store_true",
+        help="Run the browser solver headed under a virtual display (Xvfb) - "
+        "best for display-less Linux servers. Needs pyvirtualdisplay + the "
+        "Xvfb system package (SeleniumBase handles it natively).",
+    )
+    parser.add_argument(
         "-t", "--timeout", type=int, default=20, help="Per-request timeout in seconds."
     )
     parser.add_argument(
@@ -152,6 +167,8 @@ def main(argv=None) -> int:
         headers=headers or None,
         solver=args.solver,
         headless=not args.headful,
+        browser_path=args.browser_path,
+        xvfb=args.xvfb,
         verbose=args.verbose,
     )
 

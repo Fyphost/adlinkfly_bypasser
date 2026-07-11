@@ -159,6 +159,44 @@ Supported drivers (auto-detected; force one with `--solver drissionpage|selenium
 Requires a Chrome/Chromium install on the machine. Headless is easier to detect —
 if a site won't clear, run `--headful`.
 
+#### Browser binary
+
+The solver auto-detects a Chrome/Chromium binary (checks `$CHROME_BIN`, `PATH`,
+common install locations, and Playwright's downloaded browsers). If it can't
+find one you'll see an error like *"Cannot find the browser executable path"* —
+fix it by installing a browser or pointing at one explicitly:
+
+```bash
+# Debian/Ubuntu
+apt-get install -y chromium            # or: google-chrome-stable
+# Fedora/RHEL
+dnf install -y chromium
+
+# ...or point the tool at any Chromium binary:
+adlinkfly-bypass --solver browser --browser-path /usr/bin/chromium https://.../abc123
+export CHROME_BIN=/usr/bin/chromium    # alternatively, via env var
+```
+
+#### Headless servers (no display) — use Xvfb
+
+On a server with no display, a **headed** browser under a virtual display beats
+Cloudflare far more reliably than headless. Use `--xvfb`:
+
+```bash
+pip install pyvirtualdisplay
+apt-get install -y xvfb                 # system package
+adlinkfly-bypass --solver browser --xvfb https://.../abc123
+```
+
+SeleniumBase has native Xvfb support; for the other drivers the tool starts the
+virtual display via `pyvirtualdisplay`. Tip: SeleniumBase UC mode + `--xvfb` is
+one of the most reliable combinations on servers:
+
+```bash
+pip install seleniumbase
+adlinkfly-bypass --solver seleniumbase --xvfb https://.../abc123
+```
+
 ### Option B — manual cookie escape hatch
 
 Solve the challenge once in a real browser, copy the `cf_clearance` cookie *and
