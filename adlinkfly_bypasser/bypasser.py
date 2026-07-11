@@ -139,7 +139,7 @@ class AdlinkflyBypasser:
         browser_path: Optional[str] = None,
         xvfb: bool = False,
         follow: bool = True,
-        max_hops: int = 6,
+        max_hops: int = 12,
         verbose: bool = False,
     ):
         self.wait = wait

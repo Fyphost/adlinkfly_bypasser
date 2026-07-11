@@ -361,7 +361,17 @@ def find_final_link(html: str) -> Optional[str]:
 # Text/attribute keywords, in *priority order* (earlier = preferred), that
 # identify the button advancing to the next ad page or revealing the link.
 CONTINUE_KEYWORDS = (
-    # --- real link reveal / download (highest-priority "reveal" controls) ---
+    # --- human verification FIRST: on safelink flows this must be clicked
+    #     before the "generate" button becomes functional. ---
+    "human verification",
+    "verify you are human",
+    "i am human",
+    "im human",
+    "wpsafelinkhuman",
+    "human",
+    "verification",
+    "verify",
+    # --- then link reveal / generate / download (the actual link controls) ---
     "get link",
     "getlink",
     "get-link",
@@ -374,15 +384,6 @@ CONTINUE_KEYWORDS = (
     "generatelink",
     "create link",
     "generate",
-    # --- human verification / WPSafelink-Shortxlinks plugin controls ---
-    "human verification",
-    "verify you are human",
-    "i am human",
-    "im human",
-    "human",
-    "verification",
-    "verify",
-    "wpsafelinkhuman",
     "continue to link",
     "click here to continue",
     # --- generic advance (lower priority; after the "reveal" boundary) ---

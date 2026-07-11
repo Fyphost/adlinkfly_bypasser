@@ -35,6 +35,7 @@ import glob
 import importlib.util
 import logging
 import os
+import re
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -475,7 +476,7 @@ class BrowserSolver:
         backend: str = "auto",
         headless: bool = True,
         follow: bool = True,
-        max_hops: int = 6,
+        max_hops: int = 12,
         timeout: int = 60,
         poll: float = 2.0,
         settle: float = 3.0,
@@ -618,6 +619,8 @@ class BrowserSolver:
         for hop in range(1, self.max_hops + 1):
             cur = adapter.current_url()
             self._log("Ad-page hop %d: %s", hop, cur)
+            if self.verbose:
+                self._log("  controls: %s", self._labels(adapter))
 
             # Already on the final file link?
             if html_utils.is_final_host(cur):
@@ -712,7 +715,12 @@ class BrowserSolver:
                              reached=reached, ended="final_link" if reached else ended)
 
     def _wait_countdown(self, adapter) -> None:
-        secs = html_utils.find_countdown_seconds(adapter.page_html() or "") or 0
+        html = adapter.page_html() or ""
+        secs = html_utils.find_countdown_seconds(html) or 0
+        # Many safelink pages show a "please wait" with a timer we can't parse;
+        # fall back to a sensible default so the real button has time to appear.
+        if not secs and re.search(r"please\s*wait", html, re.IGNORECASE):
+            secs = 12
         secs = min(secs, 30)
         if secs > 0:
             self._log("Waiting %ds for page countdown", secs)
