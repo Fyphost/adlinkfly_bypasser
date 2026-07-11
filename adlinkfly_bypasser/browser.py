@@ -569,65 +569,153 @@ class BrowserSolver:
 
     # -- multi-page walk ---------------------------------------------------
     def _walk(self, adapter, html, cleared):
+        clicked = set()  # signatures of controls already clicked ON THIS PAGE
+        stuck = 0
+        last_url = None
+        hop_timeout = min(self.timeout, 25)
+
         for hop in range(1, self.max_hops + 1):
             cur = adapter.current_url()
             self._log("Ad-page hop %d: %s", hop, cur)
 
+            # New page => fresh set of controls (a "Continue" on a different
+            # page is legitimately different even if it shares a label).
+            if cur != last_url:
+                clicked = set()
+                last_url = cur
+
+            # Already on / already showing the final file link?
             if html_utils.is_final_host(cur):
                 self._log("Reached final file-host in the address bar")
                 return self._capture(adapter, adapter.page_html(), final=cur, cleared=cleared)
 
-            html = adapter.page_html() or ""
-            final = html_utils.find_final_link(html)
+            # These ad pages gate the real button behind a countdown - wait it
+            # out so the actual "Get Link" control/link appears before we act.
+            self._wait_countdown(adapter)
+
+            final = html_utils.find_final_link(adapter.page_html() or "")
             if final:
                 self._log("Found final file-host link in page: %s", final)
-                return self._capture(adapter, html, final=final, cleared=cleared)
+                return self._capture(adapter, adapter.page_html(), final=final, cleared=cleared)
 
-            cand = self._wait_for_continue(adapter)
+            cand = self._wait_for_continue(adapter, exclude=clicked, timeout=hop_timeout)
             if cand is None:
-                self._log("No continue control found on hop %d; stopping walk", hop)
+                # No fresh control. The link may reveal shortly; scan a while.
+                final = self._scan_final(adapter, seconds=hop_timeout)
+                if final:
+                    return self._capture(adapter, adapter.page_html(), final=final, cleared=cleared)
+                self._log("No continue control left. Controls on page: %s", self._labels(adapter))
                 break
 
+            clicked.add(html_utils.candidate_signature(cand))
             label = str(cand.get("text") or cand.get("value") or cand.get("id") or "").strip()[:60]
-            before = adapter.current_url()
-            self._log("Clicking continue control: %r", label or "<unnamed>")
+            reveal = html_utils.is_reveal_control(cand)
+            before_url = cur
+            before_len = len(adapter.page_html() or "")
+            self._log("Clicking %s control: %r", "get-link" if reveal else "continue", label or "<unnamed>")
             try:
                 adapter.click(cand["handle"])
             except Exception as exc:  # noqa: BLE001
                 self._log("Click failed: %s", exc)
-                break
+                continue
             adapter.wait_idle()
             adapter.switch_latest_tab()
-            self._wait_after_click(adapter, before)
+
+            # After clicking, wait for real progress: a URL change, the final
+            # link appearing in-place, or a Cloudflare gate to clear.
+            final, progressed = self._wait_progress(adapter, before_url, before_len, hop_timeout)
+            if final:
+                self._log("Found final file-host link after click: %s", final)
+                return self._capture(adapter, adapter.page_html(), final=final, cleared=cleared)
+            if progressed:
+                stuck = 0
+            else:
+                stuck += 1
+                self._log("No progress after click (stuck=%d)", stuck)
+                if stuck >= 3:
+                    self._log("Giving up walk (stuck). Controls on page: %s", self._labels(adapter))
+                    break
 
         # Walk ended: return the best final link we can find.
-        html = adapter.page_html() or ""
+        page_html = adapter.page_html() or ""
         cur = adapter.current_url()
-        final = html_utils.find_final_link(html)
+        final = html_utils.find_final_link(page_html)
         if not final and html_utils.is_final_host(cur):
             final = cur
-        return self._capture(adapter, html, final=final, cleared=cleared)
+        return self._capture(adapter, page_html, final=final, cleared=cleared)
 
-    def _wait_for_continue(self, adapter):
-        """Poll for the "Continue / Get Link" control (gated by a countdown)."""
-        deadline = time.time() + self.timeout
+    def _wait_countdown(self, adapter) -> None:
+        secs = html_utils.find_countdown_seconds(adapter.page_html() or "") or 0
+        secs = min(secs, 30)
+        if secs > 0:
+            self._log("Waiting %ds for page countdown", secs)
+            time.sleep(secs + 1)
+
+    def _wait_for_continue(self, adapter, exclude=None, timeout=None):
+        """Poll for a "Continue / Get Link" control.
+
+        A real reveal button (get-link/download/generate) is taken immediately.
+        A plain "Continue" is only used after a short grace period, to give a
+        higher-priority reveal button a chance to appear first - but we never
+        block for the whole timeout when a usable control already exists.
+        """
+        total = timeout or self.timeout
+        deadline = time.time() + total
+        grace_deadline = time.time() + min(5, total)
+        fallback = None
         while time.time() < deadline:
-            cand = html_utils.choose_continue(adapter.candidates())
+            cand = html_utils.choose_continue(adapter.candidates(), exclude=exclude)
             if cand is not None:
-                return cand
+                if html_utils.is_reveal_control(cand):
+                    return cand  # the actual get-link button - take it now
+                fallback = cand
+                if time.time() >= grace_deadline:
+                    return fallback
+            time.sleep(self.poll)
+        return fallback
+
+    def _scan_final(self, adapter, seconds):
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            final = html_utils.find_final_link(adapter.page_html() or "")
+            if final:
+                return final
+            if html_utils.is_final_host(adapter.current_url()):
+                return adapter.current_url()
             time.sleep(self.poll)
         return None
 
-    def _wait_after_click(self, adapter, before):
-        deadline = time.time() + self.timeout
+    def _wait_progress(self, adapter, before_url, before_len, timeout):
+        """Wait for navigation / final link / Cloudflare-clear after a click.
+
+        Returns ``(final_url_or_None, progressed_bool)``.
+        """
+        deadline = time.time() + timeout
         while time.time() < deadline:
             cur = adapter.current_url()
-            if cur and cur != before:
-                break
+            if html_utils.is_final_host(cur):
+                return cur, True
+            page_html = adapter.page_html() or ""
+            final = html_utils.find_final_link(page_html)
+            if final:
+                return final, True
+            if cur and cur != before_url:
+                if html_utils.detect_cloudflare(page_html):
+                    self._wait_cleared_adapter(adapter)
+                return None, True
             time.sleep(self.poll)
-        html = adapter.page_html() or ""
-        if html and html_utils.detect_cloudflare(html):
-            self._wait_cleared_adapter(adapter)
+        # No navigation; treat a big DOM change as (weak) progress.
+        page_html = adapter.page_html() or ""
+        changed = abs(len(page_html) - before_len) > 400
+        return None, changed
+
+    def _labels(self, adapter):
+        out = []
+        for c in adapter.candidates()[:25]:
+            lbl = str(c.get("text") or c.get("value") or c.get("id") or "").strip()
+            if lbl:
+                out.append(lbl[:30])
+        return out
 
     # -- capture / display -------------------------------------------------
     def _capture(self, adapter, html, final=None, cleared=True) -> SolveResult:

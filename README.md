@@ -220,6 +220,9 @@ Controls:
 - Recognised final hosts include the Terabox family (terabox, 1024terabox,
   teraboxapp, terafileshare, nephobox, 4funbox, …) plus Google Drive, MediaFire,
   Mega, Dropbox, GoFile, Pixeldrain and more.
+- The tool returns the canonical **share** link (e.g. `terabox.com/s/…`). It
+  skips thumbnail/preview/static-asset URLs (such as `dm-data.1024tera.com/thumbnail/…`)
+  and decodes HTML entities, so you get a clean, usable link.
 
 Run with `-v` to see each hop (URL, the button it clicked, and where it landed).
 If a specific site uses an unusual button label, tell me the verbose log and the

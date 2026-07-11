@@ -357,6 +357,126 @@ def test_choose_continue():
     print("PASS test_choose_continue")
 
 
+def test_choose_continue_exclude_and_reveal():
+    from adlinkfly_bypasser import html_utils
+
+    cands = [
+        {"text": "Continue", "tag": "a", "handle": 1},
+        {"text": "Get Link", "tag": "a", "handle": 2},
+    ]
+    chosen = html_utils.choose_continue(cands)
+    assert chosen["handle"] == 2 and html_utils.is_reveal_control(chosen)
+    # Excluding the get-link falls back to the (non-reveal) Continue.
+    sig = html_utils.candidate_signature(chosen)
+    fallback = html_utils.choose_continue(cands, exclude={sig})
+    assert fallback["handle"] == 1 and not html_utils.is_reveal_control(fallback)
+    print("PASS test_choose_continue_exclude_and_reveal")
+
+
+def test_find_final_link_rejects_thumbnail_and_decodes_entities():
+    from adlinkfly_bypasser import html_utils
+
+    # The exact trap from vplink.in: a dm-data thumbnail preview plus the real
+    # share link, both with HTML-encoded ampersands.
+    html = (
+        '<meta property="og:image" '
+        'content="https://dm-data.1024tera.com/thumbnail/abc?fid=1&amp;sign=xyz">'
+        '<a id="download" href="https://www.terabox.com/s/1AbC?a=1&amp;b=2">Get Link</a>'
+    )
+    got = html_utils.find_final_link(html)
+    assert got == "https://www.terabox.com/s/1AbC?a=1&b=2", got
+    # A thumbnail-only page yields no (share) link.
+    assert html_utils.find_final_link(
+        '<img src="https://dm-data.1024tera.com/thumbnail/abc.jpg?x=1">'
+    ) is None
+    print("PASS test_find_final_link_rejects_thumbnail_and_decodes_entities")
+
+
+class _FakeAdapter:
+    """Scripted adapter to exercise the walk algorithm without a real browser.
+
+    *pages* is a list of dicts: {url, html, candidates, next}. Clicking the
+    control advances self.idx to page['next'].
+    """
+
+    def __init__(self, pages):
+        self.pages = pages
+        self.idx = 0
+
+    def _p(self):
+        return self.pages[self.idx]
+
+    def goto(self, url):
+        pass
+
+    def current_url(self):
+        return self._p()["url"]
+
+    def page_html(self):
+        return self._p().get("html", "")
+
+    def get_cookies(self):
+        return {"cf_clearance": "tok"}
+
+    def get_user_agent(self):
+        return "Mozilla/5.0 Fake"
+
+    def candidates(self):
+        return self._p().get("candidates", [])
+
+    def click(self, handle):
+        nxt = self._p().get("next")
+        if nxt is not None:
+            self.idx = nxt
+
+    def wait_idle(self):
+        pass
+
+    def switch_latest_tab(self):
+        pass
+
+    def quit(self):
+        pass
+
+
+def test_walk_algorithm_with_fake_adapter():
+    """The walk should click through ad pages to a final Terabox share link."""
+    from adlinkfly_bypasser.browser import BrowserSolver
+
+    pages = [
+        {  # ad page 1: only a plain Continue -> navigates to page 2
+            "url": "https://ad1.example/a",
+            "html": "<html><body>ad 1</body></html>",
+            "candidates": [{"text": "Continue", "tag": "a", "handle": "c1"}],
+            "next": 1,
+        },
+        {  # ad page 2: Continue -> navigates to final page
+            "url": "https://ad2.example/b",
+            "html": "<html><body>ad 2</body></html>",
+            "candidates": [{"text": "Continue", "tag": "a", "handle": "c2"}],
+            "next": 2,
+        },
+        {  # final page: the real share link is present in the DOM
+            "url": "https://ad2.example/final",
+            "html": '<a href="https://www.terabox.com/s/1RealShare">Get Link</a>',
+            "candidates": [{"text": "Get Link", "tag": "a", "handle": "g"}],
+        },
+    ]
+    # Build a solver without triggering backend selection (no browser here).
+    solver = BrowserSolver.__new__(BrowserSolver)
+    solver.verbose = False
+    solver.poll = 0.01
+    solver.timeout = 1
+    solver.settle = 0
+    solver.max_hops = 6
+    solver.user_agent = None
+
+    result = solver._walk(_FakeAdapter(pages), "", cleared=True)
+    assert result.final_url == "https://www.terabox.com/s/1RealShare", result.final_url
+    assert result.cookies.get("cf_clearance") == "tok"
+    print("PASS test_walk_algorithm_with_fake_adapter ->", result.final_url)
+
+
 def test_browser_walk_returns_final_terabox_link():
     """Simulate the solver walking ad pages to a Terabox link."""
     server = _start_server()
@@ -495,6 +615,9 @@ if __name__ == "__main__":
     test_is_final_host()
     test_find_final_link()
     test_choose_continue()
+    test_choose_continue_exclude_and_reveal()
+    test_find_final_link_rejects_thumbnail_and_decodes_entities()
+    test_walk_algorithm_with_fake_adapter()
     test_browser_walk_returns_final_terabox_link()
     test_pick_form_rejects_wordpress_comment_form()
     test_extract_url_rejects_junk()

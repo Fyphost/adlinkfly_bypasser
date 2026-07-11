@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from html import unescape as _html_unescape
 from html.parser import HTMLParser
 from typing import Dict, List, Optional
 
@@ -274,20 +275,75 @@ def is_final_host(url: str) -> bool:
     return any(sub in host for sub in FINAL_HOST_SUBSTRINGS)
 
 
-def find_final_link(html: str) -> Optional[str]:
-    """Find the first URL in *html* that points at a final file-host.
+# URL fragments that mark a match as an *asset* (thumbnail / preview / static),
+# not the shareable file link. e.g. Terabox previews live on dm-data.*.
+_ASSET_URL_MARKERS = (
+    "/thumbnail",
+    "/thumb/",
+    "sharethumbnail",
+    "dm-data.",
+    "data.1024tera",
+    "/preview",
+    "/icon",
+    "/avatar",
+)
+_ASSET_URL_EXTS = (
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".gif",
+    ".svg",
+    ".ico",
+    ".bmp",
+    ".avif",
+    ".css",
+    ".js",
+    ".mp4",
+    ".woff",
+    ".woff2",
+    ".ttf",
+)
+# Path/query fragments that mark a URL as a genuine *share* link (preferred).
+_SHARE_URL_MARKERS = ("/s/", "/sharing/", "surl=", "/web/share", "/wap/share")
 
-    Scans hrefs and any bare URLs in the markup. Returns the matching URL or
-    ``None``. This lets the walker stop as soon as a Terabox/drive link is
-    present in the DOM, even before the last "get link" click.
+
+def _is_asset_url(url: str) -> bool:
+    """True if *url* is a static asset / thumbnail rather than a share link."""
+    low = url.lower()
+    path = low.split("?", 1)[0].split("#", 1)[0]
+    if any(path.endswith(ext) for ext in _ASSET_URL_EXTS):
+        return True
+    return any(marker in low for marker in _ASSET_URL_MARKERS)
+
+
+def find_final_link(html: str) -> Optional[str]:
+    """Find the best URL in *html* that points at a final file-host.
+
+    - HTML entities are decoded (so ``&amp;`` becomes ``&``).
+    - Thumbnail / preview / static-asset URLs are rejected (a Terabox preview
+      image on ``dm-data.1024tera.com`` is not the shareable link).
+    - A genuine *share* link (``/s/``, ``/sharing/``, ``surl=`` …) is preferred
+      over any other file-host URL.
+
+    Returns the chosen URL or ``None``.
     """
     if not html:
         return None
-    for m in _URL_RE.finditer(html):
+    text = _html_unescape(html)
+    matches: List[str] = []
+    for m in _URL_RE.finditer(text):
         candidate = m.group(0).rstrip(".,;\"')")
-        if is_final_host(candidate):
-            return candidate
-    return None
+        if not is_final_host(candidate) or _is_asset_url(candidate):
+            continue
+        if candidate not in matches:
+            matches.append(candidate)
+    if not matches:
+        return None
+    for url in matches:  # prefer canonical share links
+        if any(marker in url.lower() for marker in _SHARE_URL_MARKERS):
+            return url
+    return matches[0]
 
 
 # -- "Continue / Get Link" button selection --------------------------------
@@ -348,37 +404,63 @@ _CONTINUE_NEGATIVE = (
 )
 
 
-def choose_continue(candidates):
+# Rank boundary: keywords before "continue" are "reveal" buttons (the actual
+# get-link / download control), which the walker should prefer and treat as
+# terminal-ish. Computed once.
+_REVEAL_RANK_CUTOFF = CONTINUE_KEYWORDS.index("continue")
+
+
+def candidate_signature(cand) -> str:
+    """A stable identity for a control, used to avoid clicking it twice."""
+    return "|".join(
+        str(cand.get(k, "") or "") for k in ("text", "id", "href", "value")
+    ).strip().lower()[:200]
+
+
+def continue_rank(cand) -> Optional[int]:
+    """Priority rank of a control (lower = better), or ``None`` if it's not a
+    continue/get-link control (or is navigation/social)."""
+    blob = " ".join(
+        str(cand.get(k, "") or "") for k in ("text", "value", "id", "cls", "aria")
+    ).lower().strip()
+    if not blob and not cand.get("href"):
+        return None
+    if any(neg in blob for neg in _CONTINUE_NEGATIVE):
+        return None
+    for rank, kw in enumerate(CONTINUE_KEYWORDS):
+        if kw in blob:
+            return rank
+    return None
+
+
+def is_reveal_control(cand) -> bool:
+    """True if the control looks like the actual get-link/download button."""
+    rank = continue_rank(cand)
+    return rank is not None and rank < _REVEAL_RANK_CUTOFF
+
+
+def choose_continue(candidates, exclude=None):
     """Pick the best "continue / get link" control from parsed candidates.
 
     *candidates* is a list of dicts with any of the keys ``text``, ``value``,
     ``id``, ``cls`` (class), ``href``, ``tag`` and ``handle`` (an opaque
-    driver-specific reference). Returns the chosen candidate dict, or ``None``.
-
-    Selection is pure/testable: it scores each candidate's combined text by the
-    highest-priority :data:`CONTINUE_KEYWORDS` it contains, rejects obvious
-    navigation/social controls, and slightly prefers anchors/buttons.
+    driver-specific reference). *exclude* is an optional set of
+    :func:`candidate_signature` values to skip (controls already clicked).
+    Returns the chosen candidate dict, or ``None``.
     """
+    exclude = exclude or set()
     best = None
     best_rank = len(CONTINUE_KEYWORDS)  # lower rank = higher priority
     best_tiebreak = -1
 
     for cand in candidates or []:
-        blob = " ".join(
-            str(cand.get(k, "") or "")
-            for k in ("text", "value", "id", "cls", "aria")
-        ).lower().strip()
-        href = str(cand.get("href", "") or "")
-        if not blob and not href:
+        if candidate_signature(cand) in exclude:
             continue
-        if any(neg in blob for neg in _CONTINUE_NEGATIVE):
+        rank = continue_rank(cand)
+        if rank is None:
             continue
-
-        for rank, kw in enumerate(CONTINUE_KEYWORDS):
-            if kw in blob:
-                tag = str(cand.get("tag", "")).lower()
-                tiebreak = 2 if tag in ("a", "button") else 1
-                if rank < best_rank or (rank == best_rank and tiebreak > best_tiebreak):
-                    best, best_rank, best_tiebreak = cand, rank, tiebreak
-                break
+        tag = str(cand.get("tag", "")).lower()
+        tiebreak = 2 if tag in ("a", "button") else 1
+        if rank < best_rank or (rank == best_rank and tiebreak > best_tiebreak):
+            best, best_rank, best_tiebreak = cand, rank, tiebreak
     return best
