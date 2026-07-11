@@ -128,6 +128,12 @@ class SolveResult:
     user_agent: Optional[str] = None
     final_url: Optional[str] = None
     cleared: bool = True
+    # True only when final_url is a recognised file-host / cloud-drive link
+    # (as opposed to where the walk happened to stop, e.g. an ad page).
+    reached_final: bool = False
+    # Short reason the walk ended: "final_link", "no_controls", "max_hops",
+    # "stuck", "loop", "not_followed".
+    ended: str = ""
 
 
 def available_backends():
@@ -509,7 +515,11 @@ class BrowserSolver:
             adapter.goto(url)
             html, cleared = self._wait_cleared_adapter(adapter)
             if not self.follow:
-                return self._capture(adapter, html, cleared=cleared)
+                final = html_utils.find_final_link(html)
+                return self._capture(
+                    adapter, html, final=final, cleared=cleared,
+                    reached=bool(final), ended="not_followed",
+                )
             return self._walk(adapter, html, cleared)
         finally:
             if adapter is not None:
@@ -570,41 +580,54 @@ class BrowserSolver:
     # -- multi-page walk ---------------------------------------------------
     def _walk(self, adapter, html, cleared):
         clicked = set()  # signatures of controls already clicked ON THIS PAGE
+        visited = []  # ordered URLs seen (for loop detection)
         stuck = 0
         last_url = None
         hop_timeout = min(self.timeout, 25)
+        ended = "max_hops"
 
         for hop in range(1, self.max_hops + 1):
             cur = adapter.current_url()
             self._log("Ad-page hop %d: %s", hop, cur)
+
+            # Already on the final file link?
+            if html_utils.is_final_host(cur):
+                self._log("Reached final file-host in the address bar")
+                return self._capture(adapter, adapter.page_html(), final=cur,
+                                     cleared=cleared, reached=True, ended="final_link")
 
             # New page => fresh set of controls (a "Continue" on a different
             # page is legitimately different even if it shares a label).
             if cur != last_url:
                 clicked = set()
                 last_url = cur
+            looping = cur in visited
+            visited.append(cur)
 
-            # Already on / already showing the final file link?
-            if html_utils.is_final_host(cur):
-                self._log("Reached final file-host in the address bar")
-                return self._capture(adapter, adapter.page_html(), final=cur, cleared=cleared)
-
-            # These ad pages gate the real button behind a countdown - wait it
-            # out so the actual "Get Link" control/link appears before we act.
+            # Wait out the page countdown so the real button/link appears.
             self._wait_countdown(adapter)
 
-            final = html_utils.find_final_link(adapter.page_html() or "")
+            # Is this the LAST ad page? (It references a file-host, e.g. a
+            # Terabox preview thumbnail.) If so, wait harder for the real
+            # share link / reveal button rather than clicking a looping
+            # "Continue".
+            on_final_page = html_utils.references_final_host(adapter.page_html() or "")
+            scan_secs = hop_timeout if on_final_page else self.settle
+            final = self._scan_final(adapter, seconds=scan_secs)
             if final:
                 self._log("Found final file-host link in page: %s", final)
-                return self._capture(adapter, adapter.page_html(), final=final, cleared=cleared)
+                return self._capture(adapter, adapter.page_html(), final=final,
+                                     cleared=cleared, reached=True, ended="final_link")
 
-            cand = self._wait_for_continue(adapter, exclude=clicked, timeout=hop_timeout)
+            # Prefer a real reveal/get-link control; on the final page, refuse
+            # to click a plain "Continue" (it just loops through more ads).
+            cand = self._wait_for_continue(
+                adapter, exclude=clicked, timeout=hop_timeout,
+                reveal_only=on_final_page,
+            )
             if cand is None:
-                # No fresh control. The link may reveal shortly; scan a while.
-                final = self._scan_final(adapter, seconds=hop_timeout)
-                if final:
-                    return self._capture(adapter, adapter.page_html(), final=final, cleared=cleared)
-                self._log("No continue control left. Controls on page: %s", self._labels(adapter))
+                ended = "no_controls"
+                self._log("No usable continue/get-link control. Controls: %s", self._labels(adapter))
                 break
 
             clicked.add(html_utils.candidate_signature(cand))
@@ -621,28 +644,32 @@ class BrowserSolver:
             adapter.wait_idle()
             adapter.switch_latest_tab()
 
-            # After clicking, wait for real progress: a URL change, the final
-            # link appearing in-place, or a Cloudflare gate to clear.
             final, progressed = self._wait_progress(adapter, before_url, before_len, hop_timeout)
             if final:
                 self._log("Found final file-host link after click: %s", final)
-                return self._capture(adapter, adapter.page_html(), final=final, cleared=cleared)
-            if progressed:
+                return self._capture(adapter, adapter.page_html(), final=final,
+                                     cleared=cleared, reached=True, ended="final_link")
+            if progressed and adapter.current_url() not in visited:
                 stuck = 0
             else:
                 stuck += 1
-                self._log("No progress after click (stuck=%d)", stuck)
+                if looping:
+                    self._log("Revisited a page (ad loop) at hop %d", hop)
+                self._log("No forward progress after click (stuck=%d)", stuck)
                 if stuck >= 3:
-                    self._log("Giving up walk (stuck). Controls on page: %s", self._labels(adapter))
+                    ended = "loop" if looping else "stuck"
+                    self._log("Giving up walk (%s). Controls: %s", ended, self._labels(adapter))
                     break
 
-        # Walk ended: return the best final link we can find.
+        # Walk ended without a file-host link.
         page_html = adapter.page_html() or ""
         cur = adapter.current_url()
         final = html_utils.find_final_link(page_html)
+        reached = bool(final)
         if not final and html_utils.is_final_host(cur):
-            final = cur
-        return self._capture(adapter, page_html, final=final, cleared=cleared)
+            final, reached = cur, True
+        return self._capture(adapter, page_html, final=final, cleared=cleared,
+                             reached=reached, ended="final_link" if reached else ended)
 
     def _wait_countdown(self, adapter) -> None:
         secs = html_utils.find_countdown_seconds(adapter.page_html() or "") or 0
@@ -651,13 +678,17 @@ class BrowserSolver:
             self._log("Waiting %ds for page countdown", secs)
             time.sleep(secs + 1)
 
-    def _wait_for_continue(self, adapter, exclude=None, timeout=None):
+    def _wait_for_continue(self, adapter, exclude=None, timeout=None, reveal_only=False):
         """Poll for a "Continue / Get Link" control.
 
         A real reveal button (get-link/download/generate) is taken immediately.
         A plain "Continue" is only used after a short grace period, to give a
         higher-priority reveal button a chance to appear first - but we never
         block for the whole timeout when a usable control already exists.
+
+        With *reveal_only* (used on the final ad page), a plain "Continue" is
+        ignored entirely - only a genuine reveal/get-link button is returned -
+        so we don't loop back through more ads.
         """
         total = timeout or self.timeout
         deadline = time.time() + total
@@ -668,9 +699,10 @@ class BrowserSolver:
             if cand is not None:
                 if html_utils.is_reveal_control(cand):
                     return cand  # the actual get-link button - take it now
-                fallback = cand
-                if time.time() >= grace_deadline:
-                    return fallback
+                if not reveal_only:
+                    fallback = cand
+                    if time.time() >= grace_deadline:
+                        return fallback
             time.sleep(self.poll)
         return fallback
 
@@ -718,13 +750,15 @@ class BrowserSolver:
         return out
 
     # -- capture / display -------------------------------------------------
-    def _capture(self, adapter, html, final=None, cleared=True) -> SolveResult:
+    def _capture(self, adapter, html, final=None, cleared=True, reached=False, ended="") -> SolveResult:
         return SolveResult(
             html=html or "",
             cookies=adapter.get_cookies(),
             user_agent=adapter.get_user_agent() or self.user_agent,
             final_url=final or adapter.current_url(),
             cleared=cleared,
+            reached_final=reached,
+            ended=ended,
         )
 
     def _start_virtual_display(self):

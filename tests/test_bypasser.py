@@ -97,7 +97,8 @@ class _MockSolver:
     is exactly what a real browser solve would hand back.
     """
 
-    def __init__(self, html, cookies=None, user_agent="Mozilla/5.0 Solved", final_url=None):
+    def __init__(self, html, cookies=None, user_agent="Mozilla/5.0 Solved",
+                 final_url=None, reached_final=False, ended=""):
         from adlinkfly_bypasser import SolveResult
 
         self._result = SolveResult(
@@ -105,6 +106,8 @@ class _MockSolver:
             cookies=cookies or {"cf_clearance": "browser-solved-token"},
             user_agent=user_agent,
             final_url=final_url,
+            reached_final=reached_final,
+            ended=ended,
         )
         self._final_override = final_url
         self.calls = 0
@@ -487,8 +490,51 @@ def test_browser_walk_returns_final_terabox_link():
         bp = AdlinkflyBypasser(wait=0, backend="urllib", solver=solver)
         result = bp.bypass(_base(server) + "/cf/p1B2")
         assert result.destination == terabox, result.destination
-        assert result.method == "browser_redirect", result.method
+        assert result.method == "browser_walk", result.method
         print("PASS test_browser_walk_returns_final_terabox_link ->", result.destination)
+    finally:
+        server.shutdown()
+
+
+def test_followed_walk_without_final_raises():
+    """Follow mode that ends stuck on an ad page must NOT return the ad page."""
+    from adlinkfly_bypasser import ResolutionError
+
+    server = _start_server()
+    try:
+        adpage = "https://bcsakhi.in/educatestudies/best-universities-2026/"
+        solver = _MockSolver(
+            "<html><body>an ad blog page, no file link</body></html>",
+            final_url=adpage,
+            ended="stuck",  # walk got stuck / looped
+        )
+        bp = AdlinkflyBypasser(wait=0, backend="urllib", solver=solver, follow=True)
+        try:
+            bp.bypass(_base(server) + "/cf/p1B2")
+        except ResolutionError as exc:
+            assert "ad-page chain" in str(exc) or "file-host" in str(exc)
+            print("PASS test_followed_walk_without_final_raises")
+            return
+        raise AssertionError("expected ResolutionError for a failed ad-walk")
+    finally:
+        server.shutdown()
+
+
+def test_browser_fallback_when_http_resolution_fails():
+    """A non-Cloudflare page with no adlinkfly form should fall back to the
+    browser solver, which walks to the final link."""
+    server = _start_server()
+    try:
+        terabox = "https://1024terabox.com/s/1FallbackWin"
+        # /nothing returns a plain 404-ish page (no form) -> HTTP resolve fails.
+        solver = _MockSolver("<html>walked</html>", final_url=terabox,
+                             reached_final=True, ended="final_link")
+        bp = AdlinkflyBypasser(wait=0, backend="urllib", solver=solver)
+        result = bp.bypass(_base(server) + "/nothing")
+        assert result.destination == terabox, result.destination
+        assert result.method == "browser_walk", result.method
+        assert solver.calls == 1
+        print("PASS test_browser_fallback_when_http_resolution_fails ->", result.destination)
     finally:
         server.shutdown()
 
@@ -619,6 +665,8 @@ if __name__ == "__main__":
     test_find_final_link_rejects_thumbnail_and_decodes_entities()
     test_walk_algorithm_with_fake_adapter()
     test_browser_walk_returns_final_terabox_link()
+    test_followed_walk_without_final_raises()
+    test_browser_fallback_when_http_resolution_fails()
     test_pick_form_rejects_wordpress_comment_form()
     test_extract_url_rejects_junk()
     test_browser_redirect_to_destination_not_misparsed()

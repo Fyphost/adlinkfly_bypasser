@@ -275,6 +275,16 @@ def is_final_host(url: str) -> bool:
     return any(sub in host for sub in FINAL_HOST_SUBSTRINGS)
 
 
+def references_final_host(html: str) -> bool:
+    """True if the page mentions a final file-host *anywhere* (incl. thumbnail
+    previews / og:image). A useful signal that we've reached the last ad page,
+    where the real share link is about to be revealed."""
+    if not html:
+        return False
+    low = _html_unescape(html).lower()
+    return any(sub in low for sub in FINAL_HOST_SUBSTRINGS)
+
+
 # URL fragments that mark a match as an *asset* (thumbnail / preview / static),
 # not the shareable file link. e.g. Terabox previews live on dm-data.*.
 _ASSET_URL_MARKERS = (
@@ -370,8 +380,8 @@ CONTINUE_KEYWORDS = (
     "get-link",
     "click here",
     "unlock",
-    "skip",
-    "next",
+    "skip ad",
+    "skip this ad",
 )
 
 # Words that mark an element as navigation/social/unrelated - never click it.
@@ -401,6 +411,17 @@ _CONTINUE_NEGATIVE = (
     "search",
     "advertis",
     "cookie",
+    "skip to content",
+    "skip to main",
+    "skip navigation",
+    "scroll",
+    "read more",
+    "related",
+    "recent post",
+    "leave a comment",
+    "reply",
+    "back to top",
+    "toggle",
 )
 
 

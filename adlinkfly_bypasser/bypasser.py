@@ -27,6 +27,7 @@ from urllib.parse import urljoin, urlparse
 
 from . import html_utils
 from .exceptions import (
+    AdlinkflyBypassError,
     CloudflareChallengeError,
     ResolutionError,
     UnsupportedURLError,
@@ -177,54 +178,51 @@ class AdlinkflyBypasser:
         trail: List[str] = [url]
         current = url
         method_used = ""
-        pending_html: Optional[str] = None
-        pending_url: Optional[str] = None
+        browser_tried: set = set()
 
         for step in range(1, _MAX_STEPS + 1):
-            if pending_html is not None:
-                # Page already rendered by the browser solver; don't re-fetch.
-                html, page_url = pending_html, pending_url or current
-                status: Optional[int] = 200
-                pending_html = pending_url = None
-            else:
-                self._log("Step %d: GET %s", step, current)
-                resp = self.session.get(current)
-                html = resp.text
-                page_url = resp.url or current
-                status = resp.status_code
+            self._log("Step %d: GET %s", step, current)
+            resp = self.session.get(current)
+            html = resp.text
+            page_url = resp.url or current
+            status = resp.status_code
 
-            # Anti-bot handling: try the browser solver if enabled, otherwise
-            # raise a precise error instead of a misleading "no destination".
+            # 1) Cloudflare / anti-bot: hand off to the browser solver.
             if html_utils.detect_cloudflare(html, status):
                 if self._can_solve():
-                    html, page_url = self._solve_cloudflare(current, page_url)
-                    # The browser follows redirects while clearing Cloudflare.
-                    # If it ended up on a different site that is NOT itself an
-                    # adlinkfly interstitial, the browser already navigated all
-                    # the way to the destination - return it directly instead
-                    # of mis-parsing an ordinary landing page.
-                    if html_utils.is_final_host(page_url) or (
-                        self._left_domain(source, page_url)
-                        and not self._looks_like_interstitial(html)
-                    ):
-                        trail.append(page_url)
-                        self._log("Browser landed on destination: %s", page_url)
-                        return BypassResult(
-                            source=source,
-                            destination=page_url,
-                            steps=step,
-                            method="browser_redirect",
-                            trail=trail,
-                        )
-                self._raise_if_cloudflare(html, status)
+                    browser_tried.add(current)
+                    result = self._solve_via_browser(current)
+                    outcome = self._result_from_solve(result, source, trail, step)
+                    if outcome is not None:
+                        return outcome
+                    # non-follow: continue HTTP resolution on the rendered page
+                    html = getattr(result, "html", "") or html
+                    page_url = getattr(result, "final_url", None) or page_url
+                else:
+                    self._raise_if_cloudflare(html, status)
 
             resolved, method = self._resolve_page(page_url, html)
+
+            # 2) No destination via HTTP: if a browser solver is available, let
+            # it drive the page (handles JS-only / multi-page sites with no
+            # Cloudflare, e.g. blog content-lockers that need real clicks).
+            if resolved is None and self._can_solve() and current not in browser_tried:
+                self._log("HTTP resolution failed; trying browser solver")
+                browser_tried.add(current)
+                result = self._solve_via_browser(current)
+                outcome = self._result_from_solve(result, source, trail, step)
+                if outcome is not None:
+                    return outcome
+                html = getattr(result, "html", "") or html
+                page_url = getattr(result, "final_url", None) or page_url
+                resolved, method = self._resolve_page(page_url, html)
+
             if resolved is None:
                 raise ResolutionError(
                     "Could not find a destination link on the page. The site "
                     "may not be adlinkfly-based, may require JavaScript, or may "
-                    "be protected by an anti-bot layer. Try installing "
-                    "'cloudscraper' (pip install cloudscraper) or pass "
+                    "be protected by an anti-bot layer. Try the browser solver "
+                    "(--solver browser, e.g. pip install DrissionPage) or "
                     "backend='cloudscraper'."
                 )
 
@@ -282,34 +280,79 @@ class AdlinkflyBypasser:
         )
         return self._solver
 
-    def _solve_cloudflare(self, request_url: str, page_url: str):
-        """Use the browser solver to clear Cloudflare, then adopt its cookies.
-
-        Returns ``(html, page_url)`` for the resolver to continue with. On
-        failure, raises :class:`CloudflareChallengeError`.
-        """
+    def _solve_via_browser(self, request_url: str):
+        """Run the browser solver (clear Cloudflare + walk ad pages), adopt its
+        cookies/User-Agent, and return the :class:`SolveResult`."""
         self._log("Invoking browser solver for %s", request_url)
         solver = self._get_solver()
         try:
             result = solver.solve(request_url)
-        except CloudflareChallengeError:
-            raise
+        except AdlinkflyBypassError:
+            raise  # BrowserSolverError / CloudflareChallengeError - keep as-is
         except Exception as exc:  # noqa: BLE001 - surface as a CF error
             raise CloudflareChallengeError(
-                f"Browser solver failed to clear Cloudflare: {exc}",
-                reason="challenge",
+                f"Browser solver failed: {exc}", reason="challenge"
             ) from exc
 
-        # Adopt the browser's cf_clearance cookie + User-Agent so the remaining
-        # plain-HTTP steps (e.g. the /links/go POST) are accepted.
         self.session.update_credentials(
             cookies=getattr(result, "cookies", None),
             user_agent=getattr(result, "user_agent", None),
         )
+        self._log(
+            "Browser solver returned %d bytes (reached_final=%s, ended=%s, url=%s)",
+            len(getattr(result, "html", "") or ""),
+            getattr(result, "reached_final", False),
+            getattr(result, "ended", ""),
+            getattr(result, "final_url", None),
+        )
+        return result
+
+    # Walk outcomes that represent a "clean" stop (vs. stuck/loop/max_hops).
+    _CLEAN_ENDINGS = ("no_controls", "not_followed", "")
+
+    def _result_from_solve(self, result, source, trail, step):
+        """Turn a browser :class:`SolveResult` into a :class:`BypassResult` to
+        return, or ``None`` to signal "continue HTTP resolution on the rendered
+        page". Raises the appropriate error when the browser attempt failed.
+        """
+        final = getattr(result, "final_url", None)
+        reached = getattr(result, "reached_final", False)
+        ended = getattr(result, "ended", "")
         html = getattr(result, "html", "") or ""
-        final_url = getattr(result, "final_url", None) or page_url
-        self._log("Browser solver returned %d bytes (url=%s)", len(html), final_url)
-        return html, final_url
+
+        # 1) Reached a real file-host / cloud-drive link -> done.
+        if final and (reached or html_utils.is_final_host(final)):
+            trail.append(final)
+            return BypassResult(source, final, step, "browser_walk", trail)
+
+        # 2) Still stuck on a Cloudflare page -> precise CF error.
+        if html_utils.detect_cloudflare(html):
+            self._raise_if_cloudflare(html, None)
+
+        # 3) The rendered page is an adlinkfly interstitial -> let the HTTP
+        #    resolver finish it (now armed with the browser's cookies).
+        if self._looks_like_interstitial(html):
+            return None
+
+        # 4) Off-domain, non-interstitial landing reached by a clean stop ->
+        #    the browser followed the chain to the destination; accept it.
+        if (
+            final
+            and self._left_domain(source, final)
+            and (not self.follow or ended in self._CLEAN_ENDINGS)
+        ):
+            trail.append(final)
+            return BypassResult(source, final, step, "browser_redirect", trail)
+
+        # 5) A followed ad-walk that got stuck / looped / hit max hops.
+        if self.follow:
+            raise ResolutionError(
+                "Walked the ad-page chain but could not reach a final "
+                f"file-host link (ended: {ended or 'unknown'}). Last page: "
+                f"{final or '?'}. The site's ad flow may need --headful, a "
+                "higher --max-hops, or manual interaction."
+            )
+        return None  # non-follow: let HTTP resolution try the rendered page
 
     # -- anti-bot detection ------------------------------------------------
     def _raise_if_cloudflare(self, html: str, status_code: Optional[int]) -> None:

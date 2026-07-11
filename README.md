@@ -228,6 +228,20 @@ Run with `-v` to see each hop (URL, the button it clicked, and where it landed).
 If a specific site uses an unusual button label, tell me the verbose log and the
 keyword list can be extended.
 
+On the **last** ad page (detected because it references a file host, e.g. a
+Terabox preview), the walker refuses to click a plain "Continue" (which just
+loops through more ads) and instead waits for the real *Get Link* control /
+share link to appear. If the walk gets stuck, loops, or hits `--max-hops`
+without reaching a file-host link, the tool raises a clear error **instead of
+returning an ad page** as if it were the destination.
+
+### Sites without Cloudflare that still need a browser
+
+Some shorteners are JavaScript-only or multi-page but have no Cloudflare. When
+plain-HTTP resolution finds no link and `--solver` is set, the tool
+automatically falls back to the browser solver (and walks the flow) for those
+sites too — you don't need Cloudflare to be present.
+
 ### Option B — manual cookie escape hatch
 
 Solve the challenge once in a real browser, copy the `cf_clearance` cookie *and
