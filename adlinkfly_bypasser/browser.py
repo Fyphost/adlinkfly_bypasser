@@ -48,6 +48,25 @@ logger = logging.getLogger("adlinkfly_bypasser.browser")
 # Auto-selection order.
 _BACKENDS = ("drissionpage", "seleniumbase", "undetected", "playwright")
 
+# Clickable-candidate selectors. The base is standard and always valid; the
+# extended one also grabs the non-standard controls that safelink/blog-locker
+# plugins use - <div>/<span> styled as buttons (onclick / role=button) and
+# elements whose id/class hints at the advance/get-link/download/verify action.
+# They are queried separately so that if the extended (case-insensitive
+# attribute) selector isn't supported, we still get anchors/buttons.
+_CANDIDATE_CSS_BASE = "a, button, input[type=submit], input[type=button]"
+_CANDIDATE_CSS_EXTRA = (
+    "[onclick], [role=button], "
+    "[id*=wpsafe i], [class*=wpsafe i], [id*=safelink i], [class*=safelink i], "
+    "[id*=generate i], [class*=generate i], "
+    "[id*=getlink i], [id*=get-link i], [class*=get-link i], [class*=getlink i], "
+    "[id*=download i], [class*=download i], "
+    "[id*=continue i], [class*=continue i], "
+    "[id*=human i], [class*=human i], "
+    "[id*=btn i], [class*=btn i], [class*=button i]"
+)
+_CANDIDATE_SELECTORS = (_CANDIDATE_CSS_BASE, _CANDIDATE_CSS_EXTRA)
+
 # Executable names looked up on PATH.
 _CHROME_ON_PATH = (
     "google-chrome-stable",
@@ -209,12 +228,15 @@ class _DrissionAdapter:
 
     def candidates(self):
         out = []
-        for tag in ("a", "button", "input"):
-            for el in _safe(lambda: self._page.eles(f"tag:{tag}"), default=[]) or []:
+        seen = set()
+        for selector in _CANDIDATE_SELECTORS:
+            els = _safe(lambda: self._page.eles("css:" + selector), default=[]) or []
+            for el in els:
                 try:
-                    disp = _safe(lambda: el.states.is_displayed, default=True)
-                    enab = _safe(lambda: el.states.is_enabled, default=True)
-                    if disp is False or enab is False:
+                    if id(el) in seen:
+                        continue
+                    seen.add(id(el))
+                    if _safe(lambda: el.states.is_displayed, default=True) is False:
                         continue
                     out.append({
                         "text": _safe(lambda: el.text),
@@ -223,7 +245,7 @@ class _DrissionAdapter:
                         "cls": _safe(lambda: el.attr("class")),
                         "href": _safe(lambda: el.attr("href")),
                         "aria": _safe(lambda: el.attr("aria-label")),
-                        "tag": tag,
+                        "tag": _safe(lambda: el.tag),
                         "handle": el,
                     })
                 except Exception:  # noqa: BLE001
@@ -293,29 +315,31 @@ class _SeleniumAdapter:
 
     def candidates(self):
         out = []
-        els = _safe(
-            lambda: self._driver.find_elements(
-                self._By.CSS_SELECTOR,
-                "a, button, input[type=submit], input[type=button]",
-            ),
-            default=[],
-        ) or []
-        for el in els:
-            try:
-                if not el.is_displayed() or not el.is_enabled():
+        seen = set()
+        for selector in _CANDIDATE_SELECTORS:
+            els = _safe(
+                lambda: self._driver.find_elements(self._By.CSS_SELECTOR, selector),
+                default=[],
+            ) or []
+            for el in els:
+                if id(el) in seen:
                     continue
-            except Exception:  # noqa: BLE001
-                pass
-            out.append({
-                "text": _safe(lambda: el.text),
-                "value": _safe(lambda: el.get_attribute("value")),
-                "id": _safe(lambda: el.get_attribute("id")),
-                "cls": _safe(lambda: el.get_attribute("class")),
-                "href": _safe(lambda: el.get_attribute("href")),
-                "aria": _safe(lambda: el.get_attribute("aria-label")),
-                "tag": _safe(lambda: el.tag_name),
-                "handle": el,
-            })
+                seen.add(id(el))
+                try:
+                    if not el.is_displayed():
+                        continue
+                except Exception:  # noqa: BLE001
+                    pass
+                out.append({
+                    "text": _safe(lambda: el.text),
+                    "value": _safe(lambda: el.get_attribute("value")),
+                    "id": _safe(lambda: el.get_attribute("id")),
+                    "cls": _safe(lambda: el.get_attribute("class")),
+                    "href": _safe(lambda: el.get_attribute("href")),
+                    "aria": _safe(lambda: el.get_attribute("aria-label")),
+                    "tag": _safe(lambda: el.tag_name),
+                    "handle": el,
+                })
         return out
 
     def click(self, handle):
@@ -374,28 +398,28 @@ class _PlaywrightAdapter:
 
     def candidates(self):
         out = []
-        els = _safe(
-            lambda: self._page.query_selector_all(
-                "a, button, input[type=submit], input[type=button]"
-            ),
-            default=[],
-        ) or []
-        for el in els:
-            try:
-                if not el.is_visible() or not el.is_enabled():
+        seen = set()
+        for selector in _CANDIDATE_SELECTORS:
+            els = _safe(lambda: self._page.query_selector_all(selector), default=[]) or []
+            for el in els:
+                if id(el) in seen:
                     continue
-            except Exception:  # noqa: BLE001
-                pass
-            out.append({
-                "text": _safe(lambda: el.inner_text()),
-                "value": _safe(lambda: el.get_attribute("value")),
-                "id": _safe(lambda: el.get_attribute("id")),
-                "cls": _safe(lambda: el.get_attribute("class")),
-                "href": _safe(lambda: el.get_attribute("href")),
-                "aria": _safe(lambda: el.get_attribute("aria-label")),
-                "tag": "",
-                "handle": el,
-            })
+                seen.add(id(el))
+                try:
+                    if not el.is_visible():
+                        continue
+                except Exception:  # noqa: BLE001
+                    pass
+                out.append({
+                    "text": _safe(lambda: el.inner_text()),
+                    "value": _safe(lambda: el.get_attribute("value")),
+                    "id": _safe(lambda: el.get_attribute("id")),
+                    "cls": _safe(lambda: el.get_attribute("class")),
+                    "href": _safe(lambda: el.get_attribute("href")),
+                    "aria": _safe(lambda: el.get_attribute("aria-label")),
+                    "tag": "",
+                    "handle": el,
+                })
         return out
 
     def click(self, handle):
@@ -638,6 +662,7 @@ class BrowserSolver:
             if cand is None:
                 ended = "no_controls"
                 self._log("No usable continue/get-link control. Controls: %s", self._labels(adapter))
+                self._log_page_markers(adapter)
                 break
 
             sig = html_utils.candidate_signature(cand)
@@ -758,11 +783,35 @@ class BrowserSolver:
 
     def _labels(self, adapter):
         out = []
-        for c in adapter.candidates()[:25]:
-            lbl = str(c.get("text") or c.get("value") or c.get("id") or "").strip()
+        for c in adapter.candidates()[:30]:
+            lbl = str(c.get("text") or c.get("value") or c.get("id")
+                      or c.get("cls") or "").strip()
             if lbl:
-                out.append(lbl[:30])
+                out.append(lbl[:34])
         return out
+
+    def _log_page_markers(self, adapter):
+        """Diagnostic: which link-flow markers / countdown are on the page.
+
+        Helps identify an unknown safelink button when the walk gets stuck.
+        """
+        if not self.verbose:
+            return
+        low = (adapter.page_html() or "").lower()
+        markers = [
+            m for m in (
+                "wpsafe", "safelink", "please wait", "get link", "getlink",
+                "get-link", "download", "generate", "recaptcha", "turnstile",
+                "g-recaptcha", "countdown", "timer", "click here",
+            )
+            if m in low
+        ]
+        self._log(
+            "Page markers: %s | countdown=%s | html=%d bytes",
+            markers,
+            html_utils.find_countdown_seconds(adapter.page_html() or ""),
+            len(low),
+        )
 
     # -- capture / display -------------------------------------------------
     def _capture(self, adapter, html, final=None, cleared=True, reached=False, ended="") -> SolveResult:
