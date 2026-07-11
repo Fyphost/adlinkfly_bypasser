@@ -578,8 +578,13 @@ class BrowserSolver:
         return html, html_utils.detect_cloudflare(html) is None
 
     # -- multi-page walk ---------------------------------------------------
+    # Some plugins (e.g. WPSafelink) require clicking the *same* control more
+    # than once (a "Generate link" button often needs two clicks). Allow a
+    # control to be clicked up to this many times per page before excluding it.
+    _MAX_CLICKS_PER_CONTROL = 3
+
     def _walk(self, adapter, html, cleared):
-        clicked = set()  # signatures of controls already clicked ON THIS PAGE
+        click_counts = {}  # signature -> times clicked ON THIS PAGE
         visited = []  # ordered URLs seen (for loop detection)
         stuck = 0
         last_url = None
@@ -596,10 +601,10 @@ class BrowserSolver:
                 return self._capture(adapter, adapter.page_html(), final=cur,
                                      cleared=cleared, reached=True, ended="final_link")
 
-            # New page => fresh set of controls (a "Continue" on a different
-            # page is legitimately different even if it shares a label).
+            # New page => fresh click counts (a "Continue" on a different page
+            # is legitimately different even if it shares a label).
             if cur != last_url:
-                clicked = set()
+                click_counts = {}
                 last_url = cur
             looping = cur in visited
             visited.append(cur)
@@ -621,8 +626,13 @@ class BrowserSolver:
 
             # Prefer a real reveal/get-link control; on the final page, refuse
             # to click a plain "Continue" (it just loops through more ads).
+            # Exclude controls we've already clicked the max number of times.
+            exhausted = {
+                sig for sig, c in click_counts.items()
+                if c >= self._MAX_CLICKS_PER_CONTROL
+            }
             cand = self._wait_for_continue(
-                adapter, exclude=clicked, timeout=hop_timeout,
+                adapter, exclude=exhausted, timeout=hop_timeout,
                 reveal_only=on_final_page,
             )
             if cand is None:
@@ -630,12 +640,14 @@ class BrowserSolver:
                 self._log("No usable continue/get-link control. Controls: %s", self._labels(adapter))
                 break
 
-            clicked.add(html_utils.candidate_signature(cand))
+            sig = html_utils.candidate_signature(cand)
+            click_counts[sig] = click_counts.get(sig, 0) + 1
             label = str(cand.get("text") or cand.get("value") or cand.get("id") or "").strip()[:60]
             reveal = html_utils.is_reveal_control(cand)
             before_url = cur
             before_len = len(adapter.page_html() or "")
-            self._log("Clicking %s control: %r", "get-link" if reveal else "continue", label or "<unnamed>")
+            self._log("Clicking %s control: %r (x%d)", "get-link" if reveal else "continue",
+                      label or "<unnamed>", click_counts[sig])
             try:
                 adapter.click(cand["handle"])
             except Exception as exc:  # noqa: BLE001
@@ -656,7 +668,10 @@ class BrowserSolver:
                 if looping:
                     self._log("Revisited a page (ad loop) at hop %d", hop)
                 self._log("No forward progress after click (stuck=%d)", stuck)
-                if stuck >= 3:
+                # Give JS / countdowns a moment - the same control may need
+                # another click (e.g. WPSafelink "Generate" wants two clicks).
+                time.sleep(min(3, hop_timeout))
+                if stuck >= 5:
                     ended = "loop" if looping else "stuck"
                     self._log("Giving up walk (%s). Controls: %s", ended, self._labels(adapter))
                     break

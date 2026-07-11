@@ -242,6 +242,12 @@ plain-HTTP resolution finds no link and `--solver` is set, the tool
 automatically falls back to the browser solver (and walks the flow) for those
 sites too — you don't need Cloudflare to be present.
 
+The walker understands common plugin flows, including **WPSafelink /
+Shortxlinks** (Human-Verification → Generate Link → Download Link). It clicks
+the human-verification control, handles buttons that need **more than one
+click** (e.g. a "Generate link" that requires two clicks), and follows through
+to the final download link.
+
 ### Option B — manual cookie escape hatch
 
 Solve the challenge once in a real browser, copy the `cf_clearance` cookie *and

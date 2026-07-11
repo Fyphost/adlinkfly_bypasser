@@ -496,6 +496,96 @@ def test_browser_walk_returns_final_terabox_link():
         server.shutdown()
 
 
+def test_wpsafelink_keywords_recognised():
+    from adlinkfly_bypasser import html_utils
+
+    # The WPSafelink/Shortxlinks controls seen on softurl.in must be matched.
+    assert html_utils.is_reveal_control(
+        {"id": "wpsafelinkhuman", "text": "", "tag": "button"}
+    )
+    assert html_utils.is_reveal_control({"text": "Generate Link", "tag": "button"})
+    assert html_utils.is_reveal_control({"text": "Download Link", "tag": "a"})
+    # Footer nav is still ignored.
+    assert html_utils.choose_continue(
+        [{"text": "About Us", "tag": "a", "handle": 1},
+         {"text": "DMCA Policy", "tag": "a", "handle": 2},
+         {"text": "Terms and Conditions", "tag": "a", "handle": 3}]
+    ) is None
+    print("PASS test_wpsafelink_keywords_recognised")
+
+
+class _WpSafelinkFakeAdapter:
+    """Models the WPSafelink flow: human-verify -> generate (needs 2 clicks) ->
+    download link revealed in-place (no URL change)."""
+
+    URL = "https://safe.example/article"
+
+    def __init__(self):
+        self.state = "human"
+        self.gen_clicks = 0
+
+    def goto(self, url):
+        pass
+
+    def current_url(self):
+        return self.URL
+
+    def page_html(self):
+        if self.state == "done":
+            return '<a id="dl" href="https://terabox.com/s/1WpSafeWin">Download</a>'
+        return "<html>ad %s %s</html>" % (self.state, "x" * 1200)
+
+    def get_cookies(self):
+        return {"cf_clearance": "tok"}
+
+    def get_user_agent(self):
+        return "UA"
+
+    def candidates(self):
+        if self.state == "human":
+            return [{"text": "", "id": "wpsafelinkhuman", "tag": "button", "handle": "h"}]
+        if self.state == "generate":
+            return [{"text": "Generate Link", "id": "generate", "tag": "button", "handle": "g"}]
+        return [{"text": "Download", "href": "https://terabox.com/s/1WpSafeWin",
+                 "tag": "a", "handle": "d"}]
+
+    def click(self, handle):
+        if handle == "h":
+            self.state = "generate"
+        elif handle == "g":
+            self.gen_clicks += 1
+            if self.gen_clicks >= 2:  # WPSafelink "Generate" needs two clicks
+                self.state = "done"
+
+    def wait_idle(self):
+        pass
+
+    def switch_latest_tab(self):
+        pass
+
+    def quit(self):
+        pass
+
+
+def test_walk_wpsafelink_double_click_generate():
+    from adlinkfly_bypasser.browser import BrowserSolver
+
+    solver = BrowserSolver.__new__(BrowserSolver)
+    solver.verbose = False
+    solver.poll = 0.01
+    solver.timeout = 1
+    solver.settle = 0
+    solver.max_hops = 10
+    solver.user_agent = None
+
+    adapter = _WpSafelinkFakeAdapter()
+    result = solver._walk(adapter, "", cleared=True)
+    assert result.final_url == "https://terabox.com/s/1WpSafeWin", result.final_url
+    assert result.reached_final is True
+    assert adapter.gen_clicks == 2, adapter.gen_clicks  # clicked Generate twice
+    print("PASS test_walk_wpsafelink_double_click_generate ->", result.final_url)
+
+
 def test_followed_walk_without_final_raises():
     """Follow mode that ends stuck on an ad page must NOT return the ad page."""
     from adlinkfly_bypasser import ResolutionError
@@ -665,6 +755,8 @@ if __name__ == "__main__":
     test_find_final_link_rejects_thumbnail_and_decodes_entities()
     test_walk_algorithm_with_fake_adapter()
     test_browser_walk_returns_final_terabox_link()
+    test_wpsafelink_keywords_recognised()
+    test_walk_wpsafelink_double_click_generate()
     test_followed_walk_without_final_raises()
     test_browser_fallback_when_http_resolution_fails()
     test_pick_form_rejects_wordpress_comment_form()
