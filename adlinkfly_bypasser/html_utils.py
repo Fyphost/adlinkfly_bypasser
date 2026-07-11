@@ -396,6 +396,36 @@ def find_final_link(html: str) -> Optional[str]:
     return matches[0]
 
 
+def find_any_final_link(html: str) -> Optional[str]:
+    """Lenient final-link finder: return the best file-host URL present in the
+    page, *including* previews/thumbnails/embeds (e.g. a Terabox
+    ``dm-data.../thumbnail`` URL).
+
+    This restores the earlier, more forgiving behaviour of surfacing an embedded
+    Terabox/Drive link even when the site never exposes a clean share link -
+    useful on hostile "ad maze" lockers where the real button is unreachable but
+    the destination is referenced in the page. A validated share link is still
+    preferred when one exists.
+    """
+    if not html:
+        return None
+    text = _html_unescape(html)
+    matches: List[str] = []
+    for m in _URL_RE.finditer(text):
+        candidate = m.group(0).rstrip(".,;\"')")
+        if is_final_host(candidate) and candidate not in matches:
+            matches.append(candidate)
+    if not matches:
+        return None
+    for url in matches:  # 1) a fully-validated share link
+        if is_final_link(url):
+            return url
+    for url in matches:  # 2) any non-asset file-host URL
+        if not _is_asset_url(url):
+            return url
+    return matches[0]  # 3) last resort: even a preview/thumbnail reference
+
+
 # -- "Continue / Get Link" button selection --------------------------------
 
 # Words that mark an element as navigation/social/unrelated - never click it.

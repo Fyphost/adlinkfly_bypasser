@@ -337,6 +337,24 @@ def test_find_final_link():
     print("PASS test_find_final_link")
 
 
+def test_find_any_final_link_lenient():
+    from adlinkfly_bypasser import html_utils
+
+    # Prefer a clean share link when present.
+    both = ('<img src="https://dm-data.1024tera.com/thumbnail/x?fid=1">'
+            '<a href="https://terabox.com/s/1Real">go</a>')
+    assert html_utils.find_any_final_link(both) == "https://terabox.com/s/1Real"
+    # But fall back to an embedded preview/thumbnail when that's all there is
+    # (this is the restored earlier behaviour for hostile ad-maze pages).
+    only_thumb = '<meta property="og:image" content="https://dm-data.1024tera.com/thumbnail/abc?fid=99">'
+    assert html_utils.find_any_final_link(only_thumb) == "https://dm-data.1024tera.com/thumbnail/abc?fid=99"
+    # Strict finder still rejects the thumbnail-only case.
+    assert html_utils.find_final_link(only_thumb) is None
+    # Nothing file-host related -> None.
+    assert html_utils.find_any_final_link("<p>no links</p>") is None
+    print("PASS test_find_any_final_link_lenient")
+
+
 def test_is_final_link_validation():
     from adlinkfly_bypasser import html_utils
 
@@ -848,6 +866,7 @@ if __name__ == "__main__":
     test_solver_disabled_by_default()
     test_is_final_host()
     test_is_final_link_validation()
+    test_find_any_final_link_lenient()
     test_find_final_link()
     test_choose_continue()
     test_choose_continue_exclude_and_reveal()

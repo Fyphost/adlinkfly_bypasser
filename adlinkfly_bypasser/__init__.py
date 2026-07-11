@@ -31,6 +31,7 @@ from .browser import (
     available_backends,
     find_browser_binary,
 )
+from .html_utils import find_any_final_link, find_final_link, is_final_link
 from .bypasser import AdlinkflyBypasser, BypassResult, bypass
 from .exceptions import (
     AdlinkflyBypassError,
@@ -50,6 +51,9 @@ __all__ = [
     "BrowserSolverError",
     "available_backends",
     "find_browser_binary",
+    "find_final_link",
+    "find_any_final_link",
+    "is_final_link",
     "AdlinkflyBypassError",
     "CloudflareChallengeError",
     "NetworkError",
@@ -58,4 +62,4 @@ __all__ = [
     "UnsupportedURLError",
 ]
 
-__version__ = "1.11.0"
+__version__ = "1.12.0"

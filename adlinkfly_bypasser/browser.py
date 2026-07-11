@@ -748,6 +748,14 @@ class BrowserSolver:
             looping = cur in visited
             visited.append(cur)
 
+            # Fast path: if a Terabox/Drive link is already embedded in the
+            # page, surface it immediately (no need to wait/click further).
+            early = self._find_final(adapter.page_html() or "")
+            if early:
+                self._log("Found embedded final link: %s", early)
+                return self._capture(adapter, adapter.page_html(), final=early,
+                                     cleared=cleared, reached=True, ended="final_link")
+
             # Wait out the page countdown so the real button/link appears.
             self._wait_countdown(adapter)
 
@@ -756,7 +764,7 @@ class BrowserSolver:
             if cur not in gated and html_utils.is_image_gate(adapter.page_html() or ""):
                 gated.add(cur)
                 self._satisfy_image_gate(adapter)
-                final = html_utils.find_final_link(adapter.page_html() or "")
+                final = self._find_final(adapter.page_html() or "")
                 if final:
                     self._log("Found final file-host link after image gate: %s", final)
                     return self._capture(adapter, adapter.page_html(), final=final,
@@ -830,7 +838,7 @@ class BrowserSolver:
         # Walk ended without a file-host link.
         page_html = adapter.page_html() or ""
         cur = adapter.current_url()
-        final = html_utils.find_final_link(page_html)
+        final = self._find_final(page_html)
         reached = bool(final)
         if not final and html_utils.is_final_link(cur):
             final, reached = cur, True
@@ -896,10 +904,17 @@ class BrowserSolver:
             time.sleep(self.poll)
         return fallback
 
+    @staticmethod
+    def _find_final(html):
+        """Prefer a validated share link; fall back to any embedded file-host
+        URL (incl. previews) so a referenced Terabox/Drive link is still
+        surfaced on hostile 'ad maze' pages."""
+        return html_utils.find_final_link(html) or html_utils.find_any_final_link(html)
+
     def _scan_final(self, adapter, seconds):
         deadline = time.time() + seconds
         while time.time() < deadline:
-            final = html_utils.find_final_link(adapter.page_html() or "")
+            final = self._find_final(adapter.page_html() or "")
             if final:
                 return final
             if html_utils.is_final_link(adapter.current_url()):
@@ -918,7 +933,7 @@ class BrowserSolver:
             if html_utils.is_final_link(cur):
                 return cur, True
             page_html = adapter.page_html() or ""
-            final = html_utils.find_final_link(page_html)
+            final = self._find_final(page_html)
             if final:
                 return final, True
             if cur and cur != before_url:
