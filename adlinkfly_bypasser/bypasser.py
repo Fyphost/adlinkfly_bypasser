@@ -42,6 +42,43 @@ _GO_ENDPOINTS = ("/links/go", "/go", "/api/links/go")
 _MAX_STEPS = 5
 _DEFAULT_WAIT_CAP = 15  # never auto-wait longer than this many seconds
 
+# Hosts that show up in HTML boilerplate (XML namespaces, schemas, fonts, CDNs,
+# anti-bot widgets) and are never a real shortener destination. Used to reject
+# false-positive URL matches such as the OpenGraph namespace "ogp.me/ns".
+_JUNK_URL_HOSTS = (
+    "ogp.me",
+    "w3.org",
+    "www.w3.org",
+    "schema.org",
+    "purl.org",
+    "gmpg.org",
+    "fonts.googleapis.com",
+    "fonts.gstatic.com",
+    "ajax.googleapis.com",
+    "cdnjs.cloudflare.com",
+    "challenges.cloudflare.com",
+    "www.google.com",
+    "google.com",
+    "gravatar.com",
+    "secure.gravatar.com",
+    "api.w.org",
+)
+
+# Substrings that mark a form as NOT the adlinkfly "go-link" form (e.g. the
+# WordPress comment form on a destination blog page).
+_NON_GOLINK_FORM_MARKERS = (
+    "wp-comments-post",
+    "comment_post_id",
+    "comment_parent",
+    "wp-login",
+    "loginform",
+    "searchform",
+    "/search",
+)
+
+# Markers that identify an adlinkfly interstitial page.
+_INTERSTITIAL_MARKERS = ("go-link", "/links/go", 'name="_token"', "name='_token'")
+
 
 @dataclass
 class BypassResult:
@@ -157,6 +194,21 @@ class AdlinkflyBypasser:
             if html_utils.detect_cloudflare(html, status):
                 if self._can_solve():
                     html, page_url = self._solve_cloudflare(current, page_url)
+                    # The browser follows redirects while clearing Cloudflare.
+                    # If it ended up on a different site that is NOT itself an
+                    # adlinkfly interstitial, the browser already navigated all
+                    # the way to the destination - return it directly instead
+                    # of mis-parsing an ordinary landing page.
+                    if self._left_domain(source, page_url) and not self._looks_like_interstitial(html):
+                        trail.append(page_url)
+                        self._log("Browser landed on destination: %s", page_url)
+                        return BypassResult(
+                            source=source,
+                            destination=page_url,
+                            steps=step,
+                            method="browser_redirect",
+                            trail=trail,
+                        )
                 self._raise_if_cloudflare(html, status)
 
             resolved, method = self._resolve_page(page_url, html)
@@ -373,7 +425,7 @@ class AdlinkflyBypasser:
                 self._log("POST %s failed: %s", endpoint, exc)
                 continue
 
-            dest = self._extract_url_from_response(resp.text)
+            dest = self._extract_url_from_response(resp.text, json_only=True)
             if dest:
                 return dest
         return None
@@ -381,6 +433,12 @@ class AdlinkflyBypasser:
     def _try_generic_form_post(self, page_url: str, html: str) -> Optional[str]:
         for form in html_utils.parse_forms(html):
             if form.method_upper != "POST" or not form.action:
+                continue
+            # Never submit obviously-unrelated forms (comment/login/search),
+            # which would cause side effects and yield junk.
+            action = (form.action or "").lower()
+            keys = " ".join(k.lower() for k in form.inputs)
+            if any(m in action + " " + keys for m in _NON_GOLINK_FORM_MARKERS):
                 continue
             endpoint = urljoin(page_url, form.action)
             self._sleep_for_countdown(html)
@@ -392,16 +450,45 @@ class AdlinkflyBypasser:
                 resp = self.session.post(endpoint, data=dict(form.inputs), headers=headers)
             except Exception:  # noqa: BLE001
                 continue
-            dest = self._extract_url_from_response(resp.text)
+            dest = self._extract_url_from_response(resp.text, json_only=True)
             if dest and self._looks_external(dest, page_url):
                 return dest
         return None
 
     # -- helpers -----------------------------------------------------------
     @staticmethod
-    def _pick_form(forms):
-        """Choose the form most likely to be the adlinkfly 'go' form."""
-        if not forms:
+    def _is_golink_form(form) -> bool:
+        """True only if the form has a real adlinkfly 'go-link' signal.
+
+        This deliberately rejects unrelated forms (WordPress comment/search/
+        login) that happen to share generic field names like ``url``/``email``.
+        """
+        keys = {k.lower() for k in form.inputs}
+        action = (form.action or "").lower()
+        fid = (form.id or "").lower()
+
+        # Hard reject known non-adlinkfly forms.
+        haystack = action + " " + " ".join(keys)
+        if any(marker in haystack for marker in _NON_GOLINK_FORM_MARKERS):
+            return False
+
+        # Strong adlinkfly signals - at least one is required.
+        return (
+            "_token" in keys
+            or "links/go" in action
+            or action.endswith("/go")
+            or any(t in fid for t in ("go-link", "go_link", "golink", "landing", "shortlink"))
+        )
+
+    @classmethod
+    def _pick_form(cls, forms):
+        """Choose the form most likely to be the adlinkfly 'go' form.
+
+        Returns ``None`` unless a form with a genuine go-link signal exists, so
+        we never POST an unrelated form (which previously scraped junk URLs).
+        """
+        candidates = [f for f in forms if f.inputs and cls._is_golink_form(f)]
+        if not candidates:
             return None
 
         def score(form):
@@ -411,22 +498,28 @@ class AdlinkflyBypasser:
                 s += 5
             if "link" in keys or "url" in keys:
                 s += 2
-            if form.id and any(t in form.id.lower() for t in ("go", "link", "landing")):
+            if form.id and any(
+                t in form.id.lower() for t in ("go", "link", "landing")
+            ):
                 s += 3
             if form.action and "go" in form.action.lower():
                 s += 2
             if form.method_upper == "POST":
                 s += 1
-            s += min(len(form.inputs), 3)  # forms with hidden fields are likelier
+            s += min(len(form.inputs), 3)
             return s
 
-        best = max(forms, key=score)
-        # Require at least one input, otherwise it's not a useful payload form.
-        return best if best.inputs else None
+        return max(candidates, key=score)
 
-    @staticmethod
-    def _extract_url_from_response(text: str) -> Optional[str]:
-        """Pull a destination URL out of a (usually JSON) response body."""
+    @classmethod
+    def _extract_url_from_response(cls, text: str, json_only: bool = False) -> Optional[str]:
+        """Pull a destination URL out of a response body.
+
+        With ``json_only`` (used for the ``/links/go`` POST, which returns
+        JSON), only a JSON ``url``-style field is accepted - this prevents
+        scraping a stray URL out of an HTML page that a mis-fired POST returned
+        (e.g. the OpenGraph namespace ``https://ogp.me/ns``).
+        """
         if not text:
             return None
         text = text.strip()
@@ -439,25 +532,38 @@ class AdlinkflyBypasser:
             if isinstance(data, dict):
                 for key in ("url", "link", "redirect", "location", "destination"):
                     val = data.get(key)
-                    if isinstance(val, str) and val.startswith(("http://", "https://")):
+                    if isinstance(val, str) and cls._is_real_destination(val):
                         return val
-                # Nested {"data": {"url": ...}} shapes.
                 nested = data.get("data")
                 if isinstance(nested, dict):
                     for key in ("url", "link"):
                         val = nested.get(key)
-                        if isinstance(val, str) and val.startswith("http"):
+                        if isinstance(val, str) and cls._is_real_destination(val):
                             return val
         except (ValueError, TypeError):
             pass
 
-        # Fallback: a bare URL somewhere in the body.
+        if json_only:
+            return None
+
+        # Fallback: a bare URL somewhere in the body (only when not json_only).
         import re
 
-        m = re.search(r'https?://[^\s"\'<>\\]+', text)
-        if m:
-            return m.group(0)
+        for m in re.finditer(r'https?://[^\s"\'<>\\)]+', text):
+            candidate = m.group(0).rstrip(".,;")
+            if cls._is_real_destination(candidate):
+                return candidate
         return None
+
+    @staticmethod
+    def _is_real_destination(url: str) -> bool:
+        """Reject non-http, namespace/schema/CDN, and anti-bot boilerplate URLs."""
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            return False
+        host = urlparse(url).netloc.split("@")[-1].split(":")[0].lower()
+        if not host:
+            return False
+        return host not in _JUNK_URL_HOSTS
 
     def _sleep_for_countdown(self, html: str) -> None:
         if self.wait is not None:
@@ -504,6 +610,19 @@ class AdlinkflyBypasser:
         if not candidate.startswith(("http://", "https://")):
             return False
         return not self._same_registrable_domain(candidate, page_url)
+
+    def _left_domain(self, source: str, current: str) -> bool:
+        """True if *current* is on a different registrable domain than *source*."""
+        return not self._same_registrable_domain(source, current)
+
+    @staticmethod
+    def _looks_like_interstitial(html: str) -> bool:
+        """True if the page looks like an adlinkfly interstitial (not a plain
+        destination page)."""
+        if not html:
+            return False
+        low = html.lower()
+        return any(marker.lower() in low for marker in _INTERSTITIAL_MARKERS)
 
     def _log(self, msg, *args) -> None:
         if self.verbose:

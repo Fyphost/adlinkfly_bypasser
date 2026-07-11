@@ -97,22 +97,45 @@ class _MockSolver:
     is exactly what a real browser solve would hand back.
     """
 
-    def __init__(self, html, cookies=None, user_agent="Mozilla/5.0 Solved"):
+    def __init__(self, html, cookies=None, user_agent="Mozilla/5.0 Solved", final_url=None):
         from adlinkfly_bypasser import SolveResult
 
         self._result = SolveResult(
             html=html,
             cookies=cookies or {"cf_clearance": "browser-solved-token"},
             user_agent=user_agent,
-            final_url=None,
+            final_url=final_url,
         )
+        self._final_override = final_url
         self.calls = 0
 
     def solve(self, url):
         self.calls += 1
-        # Reflect the requested URL as the final URL.
-        self._result.final_url = url
+        # Use an explicit landing URL if given, else reflect the requested URL.
+        self._result.final_url = self._final_override or url
         return self._result
+
+
+# A WordPress destination/blog page (what vplink.in actually redirects to). It
+# has a comment form (author/email/url/comment_post_ID) and an OpenGraph
+# namespace URL - both classic false-positive traps.
+WORDPRESS_LANDING_HTML = """
+<!doctype html><html xmlns:og="https://ogp.me/ns#"><head>
+<meta property="og:title" content="Some Article">
+<link rel="https://api.w.org/" href="https://blogsite.example/wp-json/">
+</head><body>
+<h1>Online AI and Machine Learning Degree</h1>
+<form action="https://blogsite.example/wp-comments-post.php" method="post" id="commentform">
+  <input name="author" type="text">
+  <input name="email" type="text">
+  <input name="url" type="text">
+  <textarea name="comment"></textarea>
+  <input type="hidden" name="comment_post_ID" value="123">
+  <input type="hidden" name="comment_parent" value="0">
+  <input name="submit" type="submit" value="Post Comment">
+</form>
+</body></html>
+"""
 
 
 def _start_server():
@@ -268,6 +291,58 @@ def test_solver_disabled_by_default():
         server.shutdown()
 
 
+def test_browser_redirect_to_destination_not_misparsed():
+    """Regression: browser clears CF and lands on the destination blog page.
+
+    The resolver must return that landing URL, NOT scrape the WordPress
+    comment form / OpenGraph namespace (which previously yielded ogp.me/ns).
+    """
+    server = _start_server()
+    try:
+        landing = "https://blogsite.example/studyeducates/ai-degree-2026/"
+        solver = _MockSolver(WORDPRESS_LANDING_HTML, final_url=landing)
+        bp = AdlinkflyBypasser(wait=0, backend="urllib", solver=solver)
+        result = bp.bypass(_base(server) + "/cf/p1B2")
+        assert result.destination == landing, result.destination
+        assert result.method == "browser_redirect", result.method
+        print("PASS test_browser_redirect_to_destination_not_misparsed ->", result.destination)
+    finally:
+        server.shutdown()
+
+
+def test_pick_form_rejects_wordpress_comment_form():
+    from adlinkfly_bypasser import html_utils
+    from adlinkfly_bypasser.bypasser import AdlinkflyBypasser as _BP
+
+    forms = html_utils.parse_forms(WORDPRESS_LANDING_HTML)
+    assert forms, "expected to parse the comment form"
+    assert _BP._pick_form(forms) is None  # not an adlinkfly go-link form
+    # But a genuine go-link form IS picked.
+    golink = html_utils.parse_forms(INTERSTITIAL_HTML)
+    assert _BP._pick_form(golink) is not None
+    print("PASS test_pick_form_rejects_wordpress_comment_form")
+
+
+def test_extract_url_rejects_junk():
+    from adlinkfly_bypasser.bypasser import AdlinkflyBypasser as _BP
+
+    # json_only: an HTML body must not yield a scraped URL.
+    assert _BP._extract_url_from_response(WORDPRESS_LANDING_HTML, json_only=True) is None
+    # Non-json_only still rejects namespace/schema hosts like ogp.me.
+    assert _BP._extract_url_from_response('see https://ogp.me/ns# here') is None
+    # A real destination in JSON is accepted.
+    assert (
+        _BP._extract_url_from_response('{"url":"https://real.example/x"}')
+        == "https://real.example/x"
+    )
+    # A real bare URL in text is accepted.
+    assert (
+        _BP._extract_url_from_response("go to https://real.example/y now")
+        == "https://real.example/y"
+    )
+    print("PASS test_extract_url_rejects_junk")
+
+
 def test_find_browser_binary_env(tmp_path=None):
     import os
     import stat
@@ -354,6 +429,9 @@ if __name__ == "__main__":
     test_cloudflare_challenge_raises()
     test_cf_clearance_cookie_escape_hatch()
     test_solver_disabled_by_default()
+    test_pick_form_rejects_wordpress_comment_form()
+    test_extract_url_rejects_junk()
+    test_browser_redirect_to_destination_not_misparsed()
     test_find_browser_binary_env()
     test_browser_path_threads_to_solver()
     test_browser_backend_selection_without_libs()

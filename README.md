@@ -197,6 +197,16 @@ pip install seleniumbase
 adlinkfly-bypass --solver seleniumbase --xvfb https://.../abc123
 ```
 
+#### What the browser solver returns
+
+While clearing Cloudflare, the browser also **follows the shortener's redirect
+chain**. If it ends up on a normal page on a different site (for example, a
+shortener that drops you on a blog article, which is the destination the link
+creator chose), the tool returns that landing URL directly with
+`method="browser_redirect"` — it will not try to parse an ordinary destination
+page as an adlinkfly interstitial. If the browser instead lands on another
+adlinkfly interstitial, normal `/links/go` resolution continues from there.
+
 ### Option B — manual cookie escape hatch
 
 Solve the challenge once in a real browser, copy the `cf_clearance` cookie *and
