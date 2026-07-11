@@ -514,6 +514,23 @@ def test_wpsafelink_keywords_recognised():
     print("PASS test_wpsafelink_keywords_recognised")
 
 
+def test_wordpress_archive_links_not_clicked():
+    from adlinkfly_bypasser import html_utils
+
+    # Regression: 'shortxlinks' is the WP author byline, not a button. An
+    # /author/ (or /category/, /tag/) link must never be chosen.
+    author = {"text": "shortxlinks", "href": "https://x.in/author/shortxlinks/",
+              "tag": "a", "handle": 1}
+    getlink = {"text": "Get Link", "href": "https://x.in/getlink", "tag": "a", "handle": 2}
+    assert html_utils.choose_continue([author, getlink])["handle"] == 2
+    assert html_utils.choose_continue([author]) is None
+    # Category/tag archives too.
+    assert html_utils.choose_continue(
+        [{"text": "Continue", "href": "https://x.in/category/insurance/", "tag": "a", "handle": 3}]
+    ) is None
+    print("PASS test_wordpress_archive_links_not_clicked")
+
+
 class _WpSafelinkFakeAdapter:
     """Models the WPSafelink flow: human-verify -> generate (needs 2 clicks) ->
     download link revealed in-place (no URL change)."""
@@ -756,6 +773,7 @@ if __name__ == "__main__":
     test_walk_algorithm_with_fake_adapter()
     test_browser_walk_returns_final_terabox_link()
     test_wpsafelink_keywords_recognised()
+    test_wordpress_archive_links_not_clicked()
     test_walk_wpsafelink_double_click_generate()
     test_followed_walk_without_final_raises()
     test_browser_fallback_when_http_resolution_fails()

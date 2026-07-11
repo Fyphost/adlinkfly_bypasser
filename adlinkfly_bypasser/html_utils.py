@@ -383,11 +383,6 @@ CONTINUE_KEYWORDS = (
     "verification",
     "verify",
     "wpsafelinkhuman",
-    "wpsafelink",
-    "newwpsafelink",
-    "safelink",
-    "shortxlink",
-    "shortxlinks",
     "continue to link",
     "click here to continue",
     # --- generic advance (lower priority; after the "reveal" boundary) ---
@@ -456,13 +451,36 @@ def candidate_signature(cand) -> str:
     ).strip().lower()[:200]
 
 
+# href path fragments that mark a link as WordPress navigation/archive (author
+# byline, category/tag/date archives, feeds, login) - never the advance button.
+_BAD_HREF_MARKERS = (
+    "/author/",
+    "/category/",
+    "/tag/",
+    "/page/",
+    "/feed",
+    "/wp-login",
+    "/wp-admin",
+    "/cdn-cgi/",
+    "/privacy",
+    "/disclaimer",
+    "/dmca",
+    "/contact",
+    "/about",
+    "/terms",
+)
+
+
 def continue_rank(cand) -> Optional[int]:
     """Priority rank of a control (lower = better), or ``None`` if it's not a
-    continue/get-link control (or is navigation/social)."""
+    continue/get-link control (or is navigation/social/archive)."""
+    href = str(cand.get("href", "") or "").lower()
+    if href and any(marker in href for marker in _BAD_HREF_MARKERS):
+        return None  # WordPress author/category/etc. link - not an advance button
     blob = " ".join(
         str(cand.get(k, "") or "") for k in ("text", "value", "id", "cls", "aria")
     ).lower().strip()
-    if not blob and not cand.get("href"):
+    if not blob and not href:
         return None
     if any(neg in blob for neg in _CONTINUE_NEGATIVE):
         return None
