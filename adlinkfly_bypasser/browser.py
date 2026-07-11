@@ -581,6 +581,7 @@ class BrowserSolver:
         headless: bool = True,
         follow: bool = True,
         max_hops: int = 12,
+        time_budget: int = 150,
         timeout: int = 60,
         poll: float = 2.0,
         settle: float = 3.0,
@@ -592,6 +593,7 @@ class BrowserSolver:
         self.headless = headless
         self.follow = follow
         self.max_hops = max_hops
+        self.time_budget = time_budget
         self.timeout = timeout
         self.poll = poll
         self.settle = settle
@@ -719,9 +721,14 @@ class BrowserSolver:
         stuck = 0
         last_url = None
         hop_timeout = min(self.timeout, 25)
+        deadline = time.time() + getattr(self, "time_budget", 150)
         ended = "max_hops"
 
         for hop in range(1, self.max_hops + 1):
+            if time.time() > deadline:
+                ended = "timeout"
+                self._log("Walk time budget exceeded; stopping")
+                break
             cur = adapter.current_url()
             self._log("Ad-page hop %d: %s", hop, cur)
             if self.verbose:
@@ -855,8 +862,8 @@ class BrowserSolver:
         # Many safelink pages show a "please wait" with a timer we can't parse;
         # fall back to a sensible default so the real button has time to appear.
         if not secs and re.search(r"please\s*wait", html, re.IGNORECASE):
-            secs = 12
-        secs = min(secs, 30)
+            secs = 8
+        secs = min(secs, 25)
         if secs > 0:
             self._log("Waiting %ds for page countdown", secs)
             time.sleep(secs + 1)

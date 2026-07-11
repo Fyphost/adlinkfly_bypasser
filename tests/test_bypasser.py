@@ -542,6 +542,29 @@ def test_wpsafelink_keywords_recognised():
     print("PASS test_wpsafelink_keywords_recognised")
 
 
+def test_decoy_controls_not_matched():
+    """Regression for the vplink/jobskiki maze: article headings and footer
+    credits must NOT match via loose substrings."""
+    from adlinkfly_bypasser import html_utils
+
+    decoys = [
+        {"text": "Verifying Legitimate Scholarship Sources", "tag": "a", "handle": 1},  # 'verify'
+        {"text": "GeneratePress", "tag": "a", "handle": 2},                              # 'generate'
+        {"text": "Download the syllabus PDF guide here", "tag": "a", "handle": 3},       # not a button
+        {"text": "Conclusion", "tag": "a", "handle": 4},
+    ]
+    for d in decoys:
+        assert html_utils.continue_rank(d) is None, d["text"]
+    # A genuine advance control still matches.
+    assert html_utils.choose_continue(
+        decoys + [{"text": "Continue", "tag": "a", "handle": 9}]
+    )["handle"] == 9
+    # Plugin button ids still match (id substring, not text).
+    assert html_utils.is_reveal_control({"id": "wpsafegenerate", "tag": "div"})
+    assert html_utils.is_reveal_control({"cls": "get-link-btn", "tag": "div"})
+    print("PASS test_decoy_controls_not_matched")
+
+
 def test_image_gate_detection_and_instruction_rejection():
     from adlinkfly_bypasser import html_utils
 
@@ -832,6 +855,7 @@ if __name__ == "__main__":
     test_walk_algorithm_with_fake_adapter()
     test_browser_walk_returns_final_terabox_link()
     test_wpsafelink_keywords_recognised()
+    test_decoy_controls_not_matched()
     test_image_gate_detection_and_instruction_rejection()
     test_wordpress_archive_links_not_clicked()
     test_walk_wpsafelink_double_click_generate()

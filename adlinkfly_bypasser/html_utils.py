@@ -398,46 +398,6 @@ def find_final_link(html: str) -> Optional[str]:
 
 # -- "Continue / Get Link" button selection --------------------------------
 
-# Text/attribute keywords, in *priority order* (earlier = preferred), that
-# identify the button advancing to the next ad page or revealing the link.
-CONTINUE_KEYWORDS = (
-    # --- human verification FIRST: on safelink flows this must be clicked
-    #     before the "generate" button becomes functional. ---
-    "human verification",
-    "verify you are human",
-    "i am human",
-    "im human",
-    "wpsafelinkhuman",
-    "human",
-    "verification",
-    "verify",
-    # --- then link reveal / generate / download (the actual link controls) ---
-    "get link",
-    "getlink",
-    "get-link",
-    "get your link",
-    "get download link",
-    "download link",
-    "download now",
-    "your link is ready",
-    "generate link",
-    "generatelink",
-    "create link",
-    "generate",
-    "continue to link",
-    "click here to continue",
-    # --- generic advance (lower priority; after the "reveal" boundary) ---
-    "continue",
-    "proceed",
-    "go to link",
-    "gotolink",
-    "click here",
-    "unlock",
-    "download",
-    "skip ad",
-    "skip this ad",
-)
-
 # Words that mark an element as navigation/social/unrelated - never click it.
 _CONTINUE_NEGATIVE = (
     "facebook",
@@ -488,10 +448,50 @@ _CONTINUE_NEGATIVE = (
 )
 
 
-# Rank boundary: keywords before "continue" are "reveal" buttons (the actual
-# get-link / download control), which the walker should prefer and treat as
-# terminal-ish. Computed once.
-_REVEAL_RANK_CUTOFF = CONTINUE_KEYWORDS.index("continue")
+# Control-matching rules, in priority order (lower index = higher priority).
+# Each rule is (kind, pattern, is_reveal):
+#   kind="id"   -> pattern is matched as a SUBSTRING of the element's id/class
+#                  (reliable for plugin buttons like wpsafelinkhuman/wpsafegenerate).
+#   kind="word" -> pattern is matched as a WHOLE WORD/phrase in the visible text
+#                  (so "verify" does NOT match "Verifying", "generate" does NOT
+#                  match "GeneratePress", etc. - killing decoy misclicks).
+# is_reveal marks the actual get-link/download/verify controls (preferred, and
+# clickable in reveal-only mode on the final page); non-reveal are generic
+# "continue"-style advances.
+_CONTROL_RULES = (
+    ("id", "wpsafelinkhuman", True),
+    ("id", "human", True),
+    ("id", "verify", True),
+    ("word", "human verification", True),
+    ("word", "verify you are human", True),
+    ("word", "i am human", True),
+    ("id", "getlink", True),
+    ("id", "get-link", True),
+    ("id", "get_link", True),
+    ("word", "get link", True),
+    ("word", "get your link", True),
+    ("word", "get download link", True),
+    ("word", "download link", True),
+    ("word", "download now", True),
+    ("word", "your link is ready", True),
+    ("id", "downloadbtn", True),
+    ("id", "download-btn", True),
+    ("id", "wpsafegenerate", True),
+    ("id", "wpsafe-generate", True),
+    ("word", "generate link", True),
+    ("word", "create link", True),
+    ("id", "wpsafe", True),
+    ("id", "snp-", True),
+    ("id", "download", True),
+    ("word", "continue to link", True),
+    ("word", "click here to continue", True),
+    # --- generic advances (non-reveal) ---
+    ("word", "continue", False),
+    ("word", "proceed", False),
+    ("word", "go to link", False),
+    ("word", "click here", False),
+    ("word", "unlock", False),
+)
 
 
 def _normalize(text: str) -> str:
@@ -527,23 +527,39 @@ _BAD_HREF_MARKERS = (
 )
 
 
-def continue_rank(cand) -> Optional[int]:
-    """Priority rank of a control (lower = better), or ``None`` if it's not a
-    continue/get-link control (or is navigation/social/archive)."""
+def _has_word(text: str, phrase: str) -> bool:
+    """Whole-word/phrase match (so 'verify' != 'verifying', 'generate' !=
+    'generatepress')."""
+    return re.search(r"\b" + re.escape(phrase) + r"\b", text) is not None
+
+
+def _match_control(cand):
+    """Return ``(rank, is_reveal)`` for a control, or ``None`` if it isn't one."""
     href = str(cand.get("href", "") or "").lower()
     if href and any(marker in href for marker in _BAD_HREF_MARKERS):
         return None  # WordPress author/category/etc. link - not an advance button
-    blob = _normalize(
-        " ".join(str(cand.get(k, "") or "") for k in ("text", "value", "id", "cls", "aria"))
+    text = _normalize(
+        " ".join(str(cand.get(k, "") or "") for k in ("text", "value", "aria"))
     )
-    if not blob and not href:
+    idcls = _normalize(str(cand.get("id", "") or "") + " " + str(cand.get("cls", "") or ""))
+    if not text and not idcls and not href:
         return None
-    if any(neg in blob for neg in _CONTINUE_NEGATIVE):
+    if any(neg in (text + " " + idcls) for neg in _CONTINUE_NEGATIVE):
         return None
-    for rank, kw in enumerate(CONTINUE_KEYWORDS):
-        if kw in blob:
-            return rank
+    for rank, (kind, pattern, is_reveal) in enumerate(_CONTROL_RULES):
+        if kind == "id":
+            if pattern in idcls:
+                return rank, is_reveal
+        elif _has_word(text, pattern):
+            return rank, is_reveal
     return None
+
+
+def continue_rank(cand) -> Optional[int]:
+    """Priority rank of a control (lower = better), or ``None`` if it isn't a
+    continue/get-link control (or is navigation/social/archive)."""
+    m = _match_control(cand)
+    return m[0] if m else None
 
 
 # Phrases (after NFKC-normalisation) that mark the "click an ad image, wait,
@@ -573,9 +589,10 @@ def is_image_gate(html: str) -> bool:
 
 
 def is_reveal_control(cand) -> bool:
-    """True if the control looks like the actual get-link/download button."""
-    rank = continue_rank(cand)
-    return rank is not None and rank < _REVEAL_RANK_CUTOFF
+    """True if the control is an actual get-link/download/verify button (rather
+    than a generic 'continue')."""
+    m = _match_control(cand)
+    return bool(m and m[1])
 
 
 def choose_continue(candidates, exclude=None):
@@ -589,7 +606,7 @@ def choose_continue(candidates, exclude=None):
     """
     exclude = exclude or set()
     best = None
-    best_rank = len(CONTINUE_KEYWORDS)  # lower rank = higher priority
+    best_rank = len(_CONTROL_RULES)  # lower rank = higher priority
     best_tiebreak = -1
 
     for cand in candidates or []:
