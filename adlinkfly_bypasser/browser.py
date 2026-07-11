@@ -1,32 +1,32 @@
-"""Optional real-browser solver for Cloudflare-protected shorteners.
+"""Optional real-browser solver for Cloudflare-protected & multi-page shorteners.
 
-Cloudflare **managed challenges** and **Turnstile** cannot be cleared by a
-pure HTTP client (requests / cloudscraper) - they require a JavaScript engine
-and browser fingerprint. This module drives a real Chromium browser to load the
-page, waits for Cloudflare to clear, and returns the rendered HTML, the cookies
-it set (crucially ``cf_clearance``) and the browser's User-Agent. Those are then
-reused by the normal HTTP pipeline so the rest of the adlinkfly flow (the
-``/links/go`` POST) works over plain HTTP.
+Two jobs this module handles that a plain HTTP client cannot:
 
-Supported drivers, in auto-selection order (first installed one wins):
+1. **Cloudflare** managed challenges / Turnstile - cleared by rendering the page
+   in a real Chromium browser and waiting for the challenge to pass.
+2. **Multi-page "blog" content-lockers** - many adlinkfly links don't point
+   straight at the destination; they bounce you through 2-4 ad/blog pages, each
+   with a countdown and a "Continue / Get Link" button, before finally revealing
+   a file-host link (e.g. Terabox). The solver can *walk* that chain: on each
+   page it waits out the countdown, clicks the continue control, and repeats
+   until it reaches a real file-host link.
 
-1. ``DrissionPage`` - CDP-based, currently the most reliable against Cloudflare.
-2. ``seleniumbase`` - UC (undetected) mode with CAPTCHA-click helpers.
-3. ``undetected_chromedriver`` - patched Selenium Chromedriver.
-4. ``playwright`` - last resort (vanilla Playwright is often detected).
+The browser's cookies (incl. ``cf_clearance``) and User-Agent are returned so
+the rest of the adlinkfly HTTP flow can reuse them if needed.
+
+Supported drivers, auto-selected in this order (first installed wins):
+
+1. ``DrissionPage``   - CDP-based, most reliable against Cloudflare.
+2. ``seleniumbase``   - UC (undetected) mode with CAPTCHA-click helpers.
+3. ``undetected_chromedriver``
+4. ``playwright``     - last resort.
 
 Install one, e.g.::
 
     pip install DrissionPage
-    # or
-    pip install seleniumbase
-    # or
-    pip install undetected-chromedriver selenium
-    # or
-    pip install playwright && playwright install chromium
 
-None of these are imported unless a solver is actually used, so the base
-package stays dependency-free.
+None are imported unless a solver is actually used, so the base package stays
+dependency-free.
 """
 
 from __future__ import annotations
@@ -69,10 +69,8 @@ _CHROME_PATH_GLOBS = (
     "/opt/google/chrome/chrome",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    # Playwright-managed full Chromium (headed-capable).
     "~/.cache/ms-playwright/chromium-*/chrome-linux/chrome",
     "~/.cache/ms-playwright/chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
-    # Playwright headless-shell (headless only) - last resort.
     "~/.cache/ms-playwright/chromium_headless_shell-*/chrome-linux/headless_shell",
     "~/.cache/ms-playwright/chromium_headless_shell-*/chrome-linux*/headless_shell",
 )
@@ -107,6 +105,7 @@ def find_browser_binary() -> Optional[str]:
             return path
     return None
 
+
 # Map backend name -> importable module used to detect availability.
 _BACKEND_MODULE = {
     "drissionpage": "DrissionPage",
@@ -122,7 +121,7 @@ class BrowserSolverError(AdlinkflyBypassError):
 
 @dataclass
 class SolveResult:
-    """What a browser solve produced once Cloudflare was (hopefully) cleared."""
+    """What a browser solve produced once the flow was walked / CF cleared."""
 
     html: str
     cookies: Dict[str, str] = field(default_factory=dict)
@@ -143,8 +142,274 @@ def available_backends():
     return found
 
 
+def _safe(fn, default=""):
+    """Call *fn* and return its value, swallowing any error (returns default)."""
+    try:
+        v = fn()
+        return v if v is not None else default
+    except Exception:  # noqa: BLE001
+        return default
+
+
+# ==========================================================================
+# Per-driver adapters: a tiny uniform interface over each browser library.
+# ==========================================================================
+class _DrissionAdapter:
+    name = "drissionpage"
+
+    def __init__(self, solver: "BrowserSolver"):
+        from DrissionPage import ChromiumOptions, ChromiumPage  # type: ignore
+
+        co = ChromiumOptions()
+        if solver.browser_path:
+            try:
+                co.set_browser_path(solver.browser_path)
+            except Exception:  # noqa: BLE001
+                pass
+        if solver.headless:
+            co.headless()
+        if solver.user_agent:
+            try:
+                co.set_user_agent(solver.user_agent)
+            except Exception:  # noqa: BLE001
+                pass
+        for arg in ("--no-sandbox", "--disable-dev-shm-usage"):
+            try:
+                co.set_argument(arg)
+            except Exception:  # noqa: BLE001
+                pass
+        self._page = ChromiumPage(co)
+
+    def goto(self, url):
+        self._page.get(url)
+
+    def current_url(self):
+        return _safe(lambda: self._page.url)
+
+    def page_html(self):
+        return _safe(lambda: self._page.html)
+
+    def get_cookies(self):
+        ck = _safe(lambda: self._page.cookies(as_dict=True), default=None)
+        if isinstance(ck, dict):
+            return {str(k): str(v) for k, v in ck.items()}
+        return {}
+
+    def get_user_agent(self):
+        ua = _safe(lambda: self._page.user_agent, default=None)
+        if ua:
+            return ua
+        return _safe(lambda: self._page.run_js("return navigator.userAgent"), default=None)
+
+    def candidates(self):
+        out = []
+        for tag in ("a", "button", "input"):
+            for el in _safe(lambda: self._page.eles(f"tag:{tag}"), default=[]) or []:
+                try:
+                    disp = _safe(lambda: el.states.is_displayed, default=True)
+                    enab = _safe(lambda: el.states.is_enabled, default=True)
+                    if disp is False or enab is False:
+                        continue
+                    out.append({
+                        "text": _safe(lambda: el.text),
+                        "value": _safe(lambda: el.attr("value")),
+                        "id": _safe(lambda: el.attr("id")),
+                        "cls": _safe(lambda: el.attr("class")),
+                        "href": _safe(lambda: el.attr("href")),
+                        "aria": _safe(lambda: el.attr("aria-label")),
+                        "tag": tag,
+                        "handle": el,
+                    })
+                except Exception:  # noqa: BLE001
+                    continue
+        return out
+
+    def click(self, handle):
+        try:
+            handle.click()
+        except Exception:  # noqa: BLE001
+            handle.click(by_js=True)
+
+    def wait_idle(self):
+        _safe(lambda: self._page.wait.doc_loaded(timeout=15))
+
+    def switch_latest_tab(self):
+        latest = _safe(lambda: self._page.latest_tab, default=None)
+        if latest is not None and latest is not self._page:
+            self._page = latest
+
+    def quit(self):
+        _safe(lambda: self._page.quit())
+
+
+class _SeleniumAdapter:
+    """Shared adapter for undetected-chromedriver and SeleniumBase UC mode."""
+
+    def __init__(self, solver: "BrowserSolver", driver):
+        from selenium.webdriver.common.by import By  # type: ignore
+
+        self._solver = solver
+        self._driver = driver
+        self._By = By
+
+    def goto(self, url):
+        d = self._driver
+        opened = False
+        if hasattr(d, "uc_open_with_reconnect"):
+            try:
+                d.uc_open_with_reconnect(url, reconnect_time=4)
+                opened = True
+            except Exception:  # noqa: BLE001
+                opened = False
+        if not opened:
+            d.get(url)
+        if hasattr(d, "uc_gui_click_captcha"):
+            try:
+                d.uc_gui_click_captcha()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def current_url(self):
+        return _safe(lambda: self._driver.current_url)
+
+    def page_html(self):
+        return _safe(lambda: self._driver.page_source)
+
+    def get_cookies(self):
+        cks = _safe(lambda: self._driver.get_cookies(), default=[]) or []
+        return {c["name"]: c.get("value", "") for c in cks if "name" in c}
+
+    def get_user_agent(self):
+        return _safe(
+            lambda: self._driver.execute_script("return navigator.userAgent"),
+            default=None,
+        )
+
+    def candidates(self):
+        out = []
+        els = _safe(
+            lambda: self._driver.find_elements(
+                self._By.CSS_SELECTOR,
+                "a, button, input[type=submit], input[type=button]",
+            ),
+            default=[],
+        ) or []
+        for el in els:
+            try:
+                if not el.is_displayed() or not el.is_enabled():
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+            out.append({
+                "text": _safe(lambda: el.text),
+                "value": _safe(lambda: el.get_attribute("value")),
+                "id": _safe(lambda: el.get_attribute("id")),
+                "cls": _safe(lambda: el.get_attribute("class")),
+                "href": _safe(lambda: el.get_attribute("href")),
+                "aria": _safe(lambda: el.get_attribute("aria-label")),
+                "tag": _safe(lambda: el.tag_name),
+                "handle": el,
+            })
+        return out
+
+    def click(self, handle):
+        try:
+            handle.click()
+        except Exception:  # noqa: BLE001
+            self._driver.execute_script("arguments[0].click();", handle)
+
+    def wait_idle(self):
+        time.sleep(1.0)
+
+    def switch_latest_tab(self):
+        try:
+            handles = self._driver.window_handles
+            if len(handles) > 1:
+                self._driver.switch_to.window(handles[-1])
+        except Exception:  # noqa: BLE001
+            pass
+
+    def quit(self):
+        _safe(lambda: self._driver.quit())
+
+
+class _PlaywrightAdapter:
+    name = "playwright"
+
+    def __init__(self, solver: "BrowserSolver"):
+        from playwright.sync_api import sync_playwright  # type: ignore
+
+        self._pw = sync_playwright().start()
+        launch = {"headless": solver.headless}
+        if solver.browser_path:
+            launch["executable_path"] = solver.browser_path
+        self._browser = self._pw.chromium.launch(**launch)
+        ctx = {}
+        if solver.user_agent:
+            ctx["user_agent"] = solver.user_agent
+        self._context = self._browser.new_context(**ctx)
+        self._page = self._context.new_page()
+
+    def goto(self, url):
+        self._page.goto(url, wait_until="domcontentloaded")
+
+    def current_url(self):
+        return _safe(lambda: self._page.url)
+
+    def page_html(self):
+        return _safe(lambda: self._page.content())
+
+    def get_cookies(self):
+        cks = _safe(lambda: self._context.cookies(), default=[]) or []
+        return {c["name"]: c["value"] for c in cks if "name" in c}
+
+    def get_user_agent(self):
+        return _safe(lambda: self._page.evaluate("navigator.userAgent"), default=None)
+
+    def candidates(self):
+        out = []
+        els = _safe(
+            lambda: self._page.query_selector_all(
+                "a, button, input[type=submit], input[type=button]"
+            ),
+            default=[],
+        ) or []
+        for el in els:
+            try:
+                if not el.is_visible() or not el.is_enabled():
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+            out.append({
+                "text": _safe(lambda: el.inner_text()),
+                "value": _safe(lambda: el.get_attribute("value")),
+                "id": _safe(lambda: el.get_attribute("id")),
+                "cls": _safe(lambda: el.get_attribute("class")),
+                "href": _safe(lambda: el.get_attribute("href")),
+                "aria": _safe(lambda: el.get_attribute("aria-label")),
+                "tag": "",
+                "handle": el,
+            })
+        return out
+
+    def click(self, handle):
+        handle.click(timeout=5000)
+
+    def wait_idle(self):
+        _safe(lambda: self._page.wait_for_load_state("domcontentloaded", timeout=15000))
+
+    def switch_latest_tab(self):
+        pages = _safe(lambda: self._context.pages, default=[]) or []
+        if len(pages) > 1:
+            self._page = pages[-1]
+
+    def quit(self):
+        _safe(lambda: self._browser.close())
+        _safe(lambda: self._pw.stop())
+
+
 class BrowserSolver:
-    """Drive a real browser to clear a Cloudflare challenge.
+    """Drive a real browser to clear Cloudflare and walk multi-page ad flows.
 
     Parameters
     ----------
@@ -152,33 +417,35 @@ class BrowserSolver:
         ``"auto"`` (default) picks the first installed driver, or force one of
         ``"drissionpage"``, ``"seleniumbase"``, ``"undetected"``, ``"playwright"``.
     headless:
-        Run without a visible window. Note: headless is more likely to be
-        detected by Cloudflare; if solving fails, retry with ``headless=False``.
+        Run without a visible window. Headless is more likely to be detected by
+        Cloudflare; if solving fails, retry headed (``headless=False``) or with
+        ``xvfb=True``.
+    follow:
+        Walk multi-page ad/blog interstitials (click "Continue / Get Link"
+        through each page) until a final file-host link is reached. Default
+        ``True``. Set ``False`` to only clear Cloudflare and return the first
+        page.
+    max_hops:
+        Maximum number of ad pages to click through.
     timeout:
-        Max seconds to wait for the challenge to clear.
+        Max seconds to wait per phase (challenge clear, countdown, navigation).
     poll:
-        Seconds between challenge-cleared checks.
+        Seconds between polls.
     settle:
-        Extra seconds to wait after the challenge clears (lets cookies/redirects
-        settle) before capturing the page.
-    user_agent:
-        Optional User-Agent override for the browser.
-    browser_path:
-        Path to a Chrome/Chromium binary. If omitted, common locations (and
-        Playwright's downloaded browsers) are auto-detected.
-    xvfb:
-        On a display-less Linux server, run the browser under a virtual
-        display (Xvfb) so it can run *headed* - which clears Cloudflare far
-        more reliably than headless. Requires ``pyvirtualdisplay`` + the
-        ``Xvfb`` system package (SeleniumBase has native support).
+        Extra seconds to wait after a challenge clears before capturing.
+    user_agent, browser_path, xvfb:
+        See the module docs / README. ``browser_path`` is auto-detected if
+        omitted; ``xvfb`` runs headed under a virtual display on servers.
     verbose:
-        Log progress at INFO level.
+        Log progress at INFO level (very useful for debugging a specific site).
     """
 
     def __init__(
         self,
         backend: str = "auto",
         headless: bool = True,
+        follow: bool = True,
+        max_hops: int = 6,
         timeout: int = 60,
         poll: float = 2.0,
         settle: float = 3.0,
@@ -188,6 +455,8 @@ class BrowserSolver:
         verbose: bool = False,
     ):
         self.headless = headless
+        self.follow = follow
+        self.max_hops = max_hops
         self.timeout = timeout
         self.poll = poll
         self.settle = settle
@@ -228,20 +497,147 @@ class BrowserSolver:
 
     # -- public API --------------------------------------------------------
     def solve(self, url: str) -> SolveResult:
-        """Load *url* in a browser and return the cleared page + credentials."""
+        """Load *url*, clear Cloudflare, optionally walk ad pages, and return
+        the rendered page + cookies + the final URL reached."""
         self._log("Browser solver (%s) opening %s", self.backend, url)
-        # SeleniumBase manages Xvfb itself; for the others we start one here.
         display = None
         if self.xvfb and self.backend != "seleniumbase":
             display = self._start_virtual_display()
+        adapter = None
         try:
-            return getattr(self, f"_solve_{self.backend}")(url)
+            adapter = self._build_adapter()
+            adapter.goto(url)
+            html, cleared = self._wait_cleared_adapter(adapter)
+            if not self.follow:
+                return self._capture(adapter, html, cleared=cleared)
+            return self._walk(adapter, html, cleared)
         finally:
+            if adapter is not None:
+                adapter.quit()
             if display is not None:
                 try:
                     display.stop()
                 except Exception:  # noqa: BLE001
                     pass
+
+    # -- adapter construction ---------------------------------------------
+    def _build_adapter(self):
+        if self.backend == "drissionpage":
+            return _DrissionAdapter(self)
+        if self.backend == "playwright":
+            return _PlaywrightAdapter(self)
+        if self.backend == "seleniumbase":
+            from seleniumbase import Driver  # type: ignore
+
+            kwargs = {"uc": True, "headless": self.headless, "agent": self.user_agent}
+            if self.xvfb:
+                kwargs["xvfb"] = True
+                kwargs["headless"] = False
+            if self.browser_path:
+                kwargs["binary_location"] = self.browser_path
+            return _SeleniumAdapter(self, Driver(**kwargs))
+        if self.backend == "undetected":
+            import undetected_chromedriver as uc  # type: ignore
+
+            options = uc.ChromeOptions()
+            if self.headless:
+                options.add_argument("--headless=new")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            if self.user_agent:
+                options.add_argument(f"--user-agent={self.user_agent}")
+            uc_kwargs = {"options": options}
+            if self.browser_path:
+                uc_kwargs["browser_executable_path"] = self.browser_path
+            return _SeleniumAdapter(self, uc.Chrome(**uc_kwargs))
+        raise BrowserSolverError(f"Unsupported backend: {self.backend}")
+
+    # -- Cloudflare wait ---------------------------------------------------
+    def _wait_cleared_adapter(self, adapter):
+        deadline = time.time() + self.timeout
+        html = ""
+        while time.time() < deadline:
+            html = adapter.page_html() or ""
+            if html and html_utils.detect_cloudflare(html) is None:
+                self._log("Cloudflare cleared / not present")
+                if self.settle:
+                    time.sleep(self.settle)
+                return adapter.page_html() or html, True
+            time.sleep(self.poll)
+        self._log("Timed out waiting for Cloudflare to clear")
+        return html, html_utils.detect_cloudflare(html) is None
+
+    # -- multi-page walk ---------------------------------------------------
+    def _walk(self, adapter, html, cleared):
+        for hop in range(1, self.max_hops + 1):
+            cur = adapter.current_url()
+            self._log("Ad-page hop %d: %s", hop, cur)
+
+            if html_utils.is_final_host(cur):
+                self._log("Reached final file-host in the address bar")
+                return self._capture(adapter, adapter.page_html(), final=cur, cleared=cleared)
+
+            html = adapter.page_html() or ""
+            final = html_utils.find_final_link(html)
+            if final:
+                self._log("Found final file-host link in page: %s", final)
+                return self._capture(adapter, html, final=final, cleared=cleared)
+
+            cand = self._wait_for_continue(adapter)
+            if cand is None:
+                self._log("No continue control found on hop %d; stopping walk", hop)
+                break
+
+            label = str(cand.get("text") or cand.get("value") or cand.get("id") or "").strip()[:60]
+            before = adapter.current_url()
+            self._log("Clicking continue control: %r", label or "<unnamed>")
+            try:
+                adapter.click(cand["handle"])
+            except Exception as exc:  # noqa: BLE001
+                self._log("Click failed: %s", exc)
+                break
+            adapter.wait_idle()
+            adapter.switch_latest_tab()
+            self._wait_after_click(adapter, before)
+
+        # Walk ended: return the best final link we can find.
+        html = adapter.page_html() or ""
+        cur = adapter.current_url()
+        final = html_utils.find_final_link(html)
+        if not final and html_utils.is_final_host(cur):
+            final = cur
+        return self._capture(adapter, html, final=final, cleared=cleared)
+
+    def _wait_for_continue(self, adapter):
+        """Poll for the "Continue / Get Link" control (gated by a countdown)."""
+        deadline = time.time() + self.timeout
+        while time.time() < deadline:
+            cand = html_utils.choose_continue(adapter.candidates())
+            if cand is not None:
+                return cand
+            time.sleep(self.poll)
+        return None
+
+    def _wait_after_click(self, adapter, before):
+        deadline = time.time() + self.timeout
+        while time.time() < deadline:
+            cur = adapter.current_url()
+            if cur and cur != before:
+                break
+            time.sleep(self.poll)
+        html = adapter.page_html() or ""
+        if html and html_utils.detect_cloudflare(html):
+            self._wait_cleared_adapter(adapter)
+
+    # -- capture / display -------------------------------------------------
+    def _capture(self, adapter, html, final=None, cleared=True) -> SolveResult:
+        return SolveResult(
+            html=html or "",
+            cookies=adapter.get_cookies(),
+            user_agent=adapter.get_user_agent() or self.user_agent,
+            final_url=final or adapter.current_url(),
+            cleared=cleared,
+        )
 
     def _start_virtual_display(self):
         try:
@@ -255,188 +651,5 @@ class BrowserSolver:
         self._log("Starting virtual display (Xvfb)")
         display = Display(visible=False, size=(1920, 1080))
         display.start()
-        # Running under Xvfb means we can (and should) run headed.
-        self.headless = False
+        self.headless = False  # under Xvfb we run headed
         return display
-
-    # -- shared wait loop --------------------------------------------------
-    def _wait_cleared(self, get_html):
-        """Poll ``get_html()`` until Cloudflare is gone or timeout elapses.
-
-        Returns ``(html, cleared)``.
-        """
-        deadline = time.time() + self.timeout
-        html = ""
-        while time.time() < deadline:
-            try:
-                html = get_html() or ""
-            except Exception:  # noqa: BLE001 - page may be mid-navigation
-                html = ""
-            if html and html_utils.detect_cloudflare(html) is None:
-                self._log("Cloudflare cleared")
-                if self.settle:
-                    time.sleep(self.settle)
-                try:
-                    html = get_html() or html
-                except Exception:  # noqa: BLE001
-                    pass
-                return html, True
-            time.sleep(self.poll)
-        self._log("Timed out waiting for Cloudflare to clear")
-        return html, html_utils.detect_cloudflare(html) is None
-
-    # -- DrissionPage ------------------------------------------------------
-    def _solve_drissionpage(self, url: str) -> SolveResult:
-        from DrissionPage import ChromiumOptions, ChromiumPage  # type: ignore
-
-        co = ChromiumOptions()
-        if self.browser_path:
-            try:
-                co.set_browser_path(self.browser_path)
-            except Exception:  # noqa: BLE001
-                pass
-        if self.headless:
-            co.headless()
-        if self.user_agent:
-            co.set_user_agent(self.user_agent)
-        for arg in ("--no-sandbox", "--disable-dev-shm-usage"):
-            try:
-                co.set_argument(arg)
-            except Exception:  # noqa: BLE001
-                pass
-
-        page = ChromiumPage(co)
-        try:
-            page.get(url)
-            html, cleared = self._wait_cleared(lambda: page.html)
-            cookies = self._cookies_drission(page)
-            ua = self.user_agent
-            try:
-                ua = page.user_agent  # type: ignore[attr-defined]
-            except Exception:  # noqa: BLE001
-                try:
-                    ua = page.run_js("return navigator.userAgent")
-                except Exception:  # noqa: BLE001
-                    pass
-            final = getattr(page, "url", url)
-            return SolveResult(html, cookies, ua, final, cleared)
-        finally:
-            try:
-                page.quit()
-            except Exception:  # noqa: BLE001
-                pass
-
-    @staticmethod
-    def _cookies_drission(page) -> Dict[str, str]:
-        try:
-            ck = page.cookies(as_dict=True)
-            if isinstance(ck, dict):
-                return {str(k): str(v) for k, v in ck.items()}
-        except Exception:  # noqa: BLE001
-            pass
-        out: Dict[str, str] = {}
-        try:
-            for c in page.cookies():
-                if isinstance(c, dict) and "name" in c:
-                    out[c["name"]] = c.get("value", "")
-        except Exception:  # noqa: BLE001
-            pass
-        return out
-
-    # -- SeleniumBase (UC mode) -------------------------------------------
-    def _solve_seleniumbase(self, url: str) -> SolveResult:
-        from seleniumbase import Driver  # type: ignore
-
-        driver_kwargs = {"uc": True, "headless": self.headless, "agent": self.user_agent}
-        if self.xvfb:
-            driver_kwargs["xvfb"] = True
-            driver_kwargs["headless"] = False  # headed under Xvfb
-        if self.browser_path:
-            driver_kwargs["binary_location"] = self.browser_path
-        driver = Driver(**driver_kwargs)
-        try:
-            # uc_open_with_reconnect helps get past the initial challenge.
-            try:
-                driver.uc_open_with_reconnect(url, reconnect_time=4)
-            except Exception:  # noqa: BLE001
-                driver.get(url)
-            # Best-effort Turnstile checkbox click.
-            for attempt in ("uc_gui_click_captcha", "uc_gui_handle_captcha"):
-                try:
-                    getattr(driver, attempt)()
-                    break
-                except Exception:  # noqa: BLE001
-                    continue
-            html, cleared = self._wait_cleared(lambda: driver.get_page_source())
-            cookies = {
-                c["name"]: c.get("value", "") for c in driver.get_cookies()
-            }
-            ua = driver.execute_script("return navigator.userAgent")
-            final = driver.get_current_url()
-            return SolveResult(html, cookies, ua, final, cleared)
-        finally:
-            try:
-                driver.quit()
-            except Exception:  # noqa: BLE001
-                pass
-
-    # -- undetected-chromedriver ------------------------------------------
-    def _solve_undetected(self, url: str) -> SolveResult:
-        import undetected_chromedriver as uc  # type: ignore
-
-        options = uc.ChromeOptions()
-        if self.headless:
-            options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        if self.user_agent:
-            options.add_argument(f"--user-agent={self.user_agent}")
-
-        uc_kwargs = {"options": options}
-        if self.browser_path:
-            uc_kwargs["browser_executable_path"] = self.browser_path
-        driver = uc.Chrome(**uc_kwargs)
-        try:
-            driver.get(url)
-            html, cleared = self._wait_cleared(lambda: driver.page_source)
-            cookies = {
-                c["name"]: c.get("value", "") for c in driver.get_cookies()
-            }
-            ua = driver.execute_script("return navigator.userAgent")
-            final = driver.current_url
-            return SolveResult(html, cookies, ua, final, cleared)
-        finally:
-            try:
-                driver.quit()
-            except Exception:  # noqa: BLE001
-                pass
-
-    # -- Playwright (last resort) -----------------------------------------
-    def _solve_playwright(self, url: str) -> SolveResult:
-        from playwright.sync_api import sync_playwright  # type: ignore
-
-        with sync_playwright() as p:
-            launch_kwargs = {"headless": self.headless}
-            if self.browser_path:
-                launch_kwargs["executable_path"] = self.browser_path
-            browser = p.chromium.launch(**launch_kwargs)
-            ctx_kwargs = {}
-            if self.user_agent:
-                ctx_kwargs["user_agent"] = self.user_agent
-            context = browser.new_context(**ctx_kwargs)
-            page = context.new_page()
-            try:
-                page.goto(url, wait_until="domcontentloaded")
-                html, cleared = self._wait_cleared(lambda: page.content())
-                cookies = {c["name"]: c["value"] for c in context.cookies()}
-                try:
-                    ua = page.evaluate("navigator.userAgent")
-                except Exception:  # noqa: BLE001
-                    ua = self.user_agent
-                final = page.url
-                return SolveResult(html, cookies, ua, final, cleared)
-            finally:
-                try:
-                    browser.close()
-                except Exception:  # noqa: BLE001
-                    pass

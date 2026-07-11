@@ -91,6 +91,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "Xvfb system package (SeleniumBase handles it natively).",
     )
     parser.add_argument(
+        "--no-follow",
+        action="store_true",
+        help="Do NOT walk multi-page ad/blog interstitials; just clear "
+        "Cloudflare and return the first page (browser solver only).",
+    )
+    parser.add_argument(
+        "--max-hops",
+        type=int,
+        default=6,
+        metavar="N",
+        help="Max ad pages the browser solver clicks through (default: 6).",
+    )
+    parser.add_argument(
         "-t", "--timeout", type=int, default=20, help="Per-request timeout in seconds."
     )
     parser.add_argument(
@@ -169,6 +182,8 @@ def main(argv=None) -> int:
         headless=not args.headful,
         browser_path=args.browser_path,
         xvfb=args.xvfb,
+        follow=not args.no_follow,
+        max_hops=args.max_hops,
         verbose=args.verbose,
     )
 

@@ -310,6 +310,69 @@ def test_browser_redirect_to_destination_not_misparsed():
         server.shutdown()
 
 
+def test_is_final_host():
+    from adlinkfly_bypasser import html_utils
+
+    assert html_utils.is_final_host("https://www.terabox.com/s/1abc")
+    assert html_utils.is_final_host("https://1024terabox.com/s/x")
+    assert html_utils.is_final_host("https://drive.google.com/file/d/x")
+    assert not html_utils.is_final_host("https://jobskiki.in/some/article/")
+    assert not html_utils.is_final_host("https://vplink.in/p1B2")
+    print("PASS test_is_final_host")
+
+
+def test_find_final_link():
+    from adlinkfly_bypasser import html_utils
+
+    html = """
+    <a href="/local">nope</a>
+    <a href="https://ad.example/next">still an ad</a>
+    <a class="btn" href="https://teraboxapp.com/s/1XyZ">Download</a>
+    """
+    assert html_utils.find_final_link(html) == "https://teraboxapp.com/s/1XyZ"
+    assert html_utils.find_final_link("<p>no links here</p>") is None
+    print("PASS test_find_final_link")
+
+
+def test_choose_continue():
+    from adlinkfly_bypasser import html_utils
+
+    candidates = [
+        {"text": "Home", "tag": "a", "handle": 1},
+        {"text": "Share on Facebook", "tag": "a", "handle": 2},
+        {"text": "Next", "tag": "button", "handle": 3},
+        {"text": "Get Link", "tag": "a", "handle": 4},
+    ]
+    chosen = html_utils.choose_continue(candidates)
+    assert chosen is not None and chosen["handle"] == 4, chosen  # "get link" wins
+    # Nav/social only -> nothing to click.
+    assert html_utils.choose_continue(
+        [{"text": "Login", "tag": "a", "handle": 9},
+         {"text": "Privacy Policy", "tag": "a", "handle": 10}]
+    ) is None
+    # Matches on id/class too.
+    assert html_utils.choose_continue(
+        [{"id": "verify_button", "tag": "button", "handle": 7}]
+    )["handle"] == 7
+    print("PASS test_choose_continue")
+
+
+def test_browser_walk_returns_final_terabox_link():
+    """Simulate the solver walking ad pages to a Terabox link."""
+    server = _start_server()
+    try:
+        terabox = "https://www.terabox.com/s/1AbCdEfGhIjK"
+        # The solver (browser) walked the ad pages and returned the file link.
+        solver = _MockSolver("<html><body>ad page</body></html>", final_url=terabox)
+        bp = AdlinkflyBypasser(wait=0, backend="urllib", solver=solver)
+        result = bp.bypass(_base(server) + "/cf/p1B2")
+        assert result.destination == terabox, result.destination
+        assert result.method == "browser_redirect", result.method
+        print("PASS test_browser_walk_returns_final_terabox_link ->", result.destination)
+    finally:
+        server.shutdown()
+
+
 def test_pick_form_rejects_wordpress_comment_form():
     from adlinkfly_bypasser import html_utils
     from adlinkfly_bypasser.bypasser import AdlinkflyBypasser as _BP
@@ -429,6 +492,10 @@ if __name__ == "__main__":
     test_cloudflare_challenge_raises()
     test_cf_clearance_cookie_escape_hatch()
     test_solver_disabled_by_default()
+    test_is_final_host()
+    test_find_final_link()
+    test_choose_continue()
+    test_browser_walk_returns_final_terabox_link()
     test_pick_form_rejects_wordpress_comment_form()
     test_extract_url_rejects_junk()
     test_browser_redirect_to_destination_not_misparsed()

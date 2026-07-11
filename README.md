@@ -197,15 +197,33 @@ pip install seleniumbase
 adlinkfly-bypass --solver seleniumbase --xvfb https://.../abc123
 ```
 
-#### What the browser solver returns
+#### Multi-page "blog" ad flows (walking to the final file link)
 
-While clearing Cloudflare, the browser also **follows the shortener's redirect
-chain**. If it ends up on a normal page on a different site (for example, a
-shortener that drops you on a blog article, which is the destination the link
-creator chose), the tool returns that landing URL directly with
-`method="browser_redirect"` — it will not try to parse an ordinary destination
-page as an adlinkfly interstitial. If the browser instead lands on another
-adlinkfly interstitial, normal `/links/go` resolution continues from there.
+Many adlinkfly links don't point straight at the destination — they bounce you
+through 2–4 ad/blog pages, each with a countdown and a **"Continue / Get Link"**
+button, before finally revealing a file-host link (e.g. **Terabox**, Google
+Drive, MediaFire). The browser solver **walks that chain automatically**: on
+each page it clears any Cloudflare, waits for the "continue" control to become
+clickable, clicks it, and repeats until it reaches a recognised file-host link.
+
+This is on by default when using the browser solver:
+
+```bash
+adlinkfly-bypass --solver browser --xvfb -v https://vplink.in/p1B2
+# -> https://www.terabox.com/s/....   (the real destination)
+```
+
+Controls:
+
+- `--no-follow` — stop after clearing Cloudflare on the first page (don't walk).
+- `--max-hops N` — cap how many ad pages to click through (default 6).
+- Recognised final hosts include the Terabox family (terabox, 1024terabox,
+  teraboxapp, terafileshare, nephobox, 4funbox, …) plus Google Drive, MediaFire,
+  Mega, Dropbox, GoFile, Pixeldrain and more.
+
+Run with `-v` to see each hop (URL, the button it clicked, and where it landed).
+If a specific site uses an unusual button label, tell me the verbose log and the
+keyword list can be extended.
 
 ### Option B — manual cookie escape hatch
 

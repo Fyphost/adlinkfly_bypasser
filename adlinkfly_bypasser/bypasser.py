@@ -137,6 +137,8 @@ class AdlinkflyBypasser:
         headless: bool = True,
         browser_path: Optional[str] = None,
         xvfb: bool = False,
+        follow: bool = True,
+        max_hops: int = 6,
         verbose: bool = False,
     ):
         self.wait = wait
@@ -146,6 +148,8 @@ class AdlinkflyBypasser:
         self.headless = headless
         self.browser_path = browser_path
         self.xvfb = xvfb
+        self.follow = follow
+        self.max_hops = max_hops
         # solver: "none" | "browser" | "auto" | a browser backend name | an
         # object exposing .solve(url) -> SolveResult (for custom/test solvers).
         self.solver_spec = solver
@@ -199,7 +203,10 @@ class AdlinkflyBypasser:
                     # adlinkfly interstitial, the browser already navigated all
                     # the way to the destination - return it directly instead
                     # of mis-parsing an ordinary landing page.
-                    if self._left_domain(source, page_url) and not self._looks_like_interstitial(html):
+                    if html_utils.is_final_host(page_url) or (
+                        self._left_domain(source, page_url)
+                        and not self._looks_like_interstitial(html)
+                    ):
                         trail.append(page_url)
                         self._log("Browser landed on destination: %s", page_url)
                         return BypassResult(
@@ -266,6 +273,8 @@ class AdlinkflyBypasser:
         self._solver = BrowserSolver(
             backend=backend,
             headless=self.headless,
+            follow=self.follow,
+            max_hops=self.max_hops,
             user_agent=self.user_agent,
             browser_path=self.browser_path,
             xvfb=self.xvfb,

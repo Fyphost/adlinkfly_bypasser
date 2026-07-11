@@ -213,3 +213,172 @@ def detect_cloudflare(html: str, status_code: Optional[int] = None) -> Optional[
         return "managed challenge"
 
     return None
+
+
+
+# -- Final file-host detection --------------------------------------------
+
+# Substrings identifying a real file-host / cloud-drive destination. These are
+# where adlinkfly "blog" content-lockers eventually send you (Terabox & family,
+# plus the usual cloud drives / file hosts). Matching one means we've reached
+# the end of the ad-page chain.
+FINAL_HOST_SUBSTRINGS = (
+    # Terabox and its many mirror domains
+    "terabox",
+    "1024tera",
+    "teraboxapp",
+    "teraboxlink",
+    "terafileshare",
+    "terasharelink",
+    "freeterabox",
+    "teraboxdrive",
+    "nephobox",
+    "4funbox",
+    "mirrobox",
+    "momerybox",
+    "tibibox",
+    "gibibox",
+    # Common cloud drives / file hosts
+    "mega.nz",
+    "mega.co.nz",
+    "mediafire.com",
+    "drive.google.com",
+    "docs.google.com",
+    "dropbox.com",
+    "gofile.io",
+    "pixeldrain.com",
+    "krakenfiles.com",
+    "send.cm",
+    "sfile.mobi",
+    "anonfiles",
+    "1fichier.com",
+    "workers.dev",
+)
+
+_URL_RE = re.compile(r'https?://[^\s"\'<>\\)]+', re.IGNORECASE)
+
+
+def _host_of(url: str) -> str:
+    """Return the lowercased host of *url* (no scheme/port/path)."""
+    m = re.match(r"https?://([^/:?#]+)", url, re.IGNORECASE)
+    return m.group(1).lower() if m else ""
+
+
+def is_final_host(url: str) -> bool:
+    """True if *url*'s host looks like a final file-host / cloud drive."""
+    if not url:
+        return False
+    host = _host_of(url)
+    if not host:
+        return False
+    return any(sub in host for sub in FINAL_HOST_SUBSTRINGS)
+
+
+def find_final_link(html: str) -> Optional[str]:
+    """Find the first URL in *html* that points at a final file-host.
+
+    Scans hrefs and any bare URLs in the markup. Returns the matching URL or
+    ``None``. This lets the walker stop as soon as a Terabox/drive link is
+    present in the DOM, even before the last "get link" click.
+    """
+    if not html:
+        return None
+    for m in _URL_RE.finditer(html):
+        candidate = m.group(0).rstrip(".,;\"')")
+        if is_final_host(candidate):
+            return candidate
+    return None
+
+
+# -- "Continue / Get Link" button selection --------------------------------
+
+# Text/attribute keywords, in *priority order* (earlier = preferred), that
+# identify the button advancing to the next ad page or revealing the link.
+CONTINUE_KEYWORDS = (
+    "get link",
+    "getlink",
+    "get your link",
+    "get download link",
+    "download link",
+    "generate link",
+    "generatelink",
+    "click here to continue",
+    "continue to link",
+    "continue",
+    "verify",
+    "i am human",
+    "im human",
+    "proceed",
+    "go to link",
+    "gotolink",
+    "get-link",
+    "click here",
+    "unlock",
+    "skip",
+    "next",
+)
+
+# Words that mark an element as navigation/social/unrelated - never click it.
+_CONTINUE_NEGATIVE = (
+    "facebook",
+    "twitter",
+    "telegram",
+    "whatsapp",
+    "instagram",
+    "youtube",
+    "share",
+    "comment",
+    "login",
+    "log in",
+    "sign in",
+    "signup",
+    "sign up",
+    "subscribe",
+    "home",
+    "privacy",
+    "policy",
+    "terms",
+    "contact",
+    "about",
+    "disclaimer",
+    "menu",
+    "search",
+    "advertis",
+    "cookie",
+)
+
+
+def choose_continue(candidates):
+    """Pick the best "continue / get link" control from parsed candidates.
+
+    *candidates* is a list of dicts with any of the keys ``text``, ``value``,
+    ``id``, ``cls`` (class), ``href``, ``tag`` and ``handle`` (an opaque
+    driver-specific reference). Returns the chosen candidate dict, or ``None``.
+
+    Selection is pure/testable: it scores each candidate's combined text by the
+    highest-priority :data:`CONTINUE_KEYWORDS` it contains, rejects obvious
+    navigation/social controls, and slightly prefers anchors/buttons.
+    """
+    best = None
+    best_rank = len(CONTINUE_KEYWORDS)  # lower rank = higher priority
+    best_tiebreak = -1
+
+    for cand in candidates or []:
+        blob = " ".join(
+            str(cand.get(k, "") or "")
+            for k in ("text", "value", "id", "cls", "aria")
+        ).lower().strip()
+        href = str(cand.get("href", "") or "")
+        if not blob and not href:
+            continue
+        if any(neg in blob for neg in _CONTINUE_NEGATIVE):
+            continue
+
+        for rank, kw in enumerate(CONTINUE_KEYWORDS):
+            if kw in blob:
+                tag = str(cand.get("tag", "")).lower()
+                tiebreak = 2 if tag in ("a", "button") else 1
+                if rank < best_rank or (rank == best_rank and tiebreak > best_tiebreak):
+                    best, best_rank, best_tiebreak = cand, rank, tiebreak
+                break
+    return best
