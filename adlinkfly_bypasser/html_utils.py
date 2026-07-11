@@ -10,6 +10,7 @@ dependency-free.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from html import unescape as _html_unescape
 from html.parser import HTMLParser
@@ -475,6 +476,15 @@ _CONTINUE_NEGATIVE = (
     "reply",
     "back to top",
     "toggle",
+    # instruction labels (not the button): "click image & wait & come back..."
+    "click image",
+    "click on any",
+    "click any image",
+    "come back this page",
+    "then back",
+    "then come back",
+    "wait & come",
+    "learn more",
 )
 
 
@@ -482,6 +492,12 @@ _CONTINUE_NEGATIVE = (
 # get-link / download control), which the walker should prefer and treat as
 # terminal-ish. Computed once.
 _REVEAL_RANK_CUTOFF = CONTINUE_KEYWORDS.index("continue")
+
+
+def _normalize(text: str) -> str:
+    """Lowercase + NFKC-normalize so 'stylish' unicode button text (e.g.
+    mathematical-bold '𝗚𝗲𝘁 𝗟𝗶𝗻𝗸') matches plain keywords."""
+    return unicodedata.normalize("NFKC", str(text or "")).lower().strip()
 
 
 def candidate_signature(cand) -> str:
@@ -517,9 +533,9 @@ def continue_rank(cand) -> Optional[int]:
     href = str(cand.get("href", "") or "").lower()
     if href and any(marker in href for marker in _BAD_HREF_MARKERS):
         return None  # WordPress author/category/etc. link - not an advance button
-    blob = " ".join(
-        str(cand.get(k, "") or "") for k in ("text", "value", "id", "cls", "aria")
-    ).lower().strip()
+    blob = _normalize(
+        " ".join(str(cand.get(k, "") or "") for k in ("text", "value", "id", "cls", "aria"))
+    )
     if not blob and not href:
         return None
     if any(neg in blob for neg in _CONTINUE_NEGATIVE):
@@ -528,6 +544,32 @@ def continue_rank(cand) -> Optional[int]:
         if kw in blob:
             return rank
     return None
+
+
+# Phrases (after NFKC-normalisation) that mark the "click an ad image, wait,
+# then come back to get the link" anti-bot gate used by these blog lockers.
+_IMAGE_GATE_PHRASES = (
+    "click image",
+    "click on any",
+    "click any image",
+    "click on image",
+    "click the image",
+    "come back this page",
+    "back this page to get",
+    "wait & come back",
+    "wait and come back",
+    "then come back",
+    "click & wait",
+    "click and wait",
+)
+
+
+def is_image_gate(html: str) -> bool:
+    """Detect the "click an image / wait / come back to get link" ad gate."""
+    if not html:
+        return False
+    norm = _normalize(html)
+    return any(phrase in norm for phrase in _IMAGE_GATE_PHRASES)
 
 
 def is_reveal_control(cand) -> bool:

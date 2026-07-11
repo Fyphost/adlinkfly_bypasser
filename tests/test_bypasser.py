@@ -454,7 +454,16 @@ class _FakeAdapter:
     def wait_idle(self):
         pass
 
-    def switch_latest_tab(self):
+    def handle_new_tabs(self):
+        pass
+
+    def close_popups(self):
+        pass
+
+    def click_image_ad(self):
+        return False
+
+    def back(self):
         pass
 
     def quit(self):
@@ -533,6 +542,27 @@ def test_wpsafelink_keywords_recognised():
     print("PASS test_wpsafelink_keywords_recognised")
 
 
+def test_image_gate_detection_and_instruction_rejection():
+    from adlinkfly_bypasser import html_utils
+
+    # Plain "click image ... come back" instruction is detected as a gate.
+    assert html_utils.is_image_gate(
+        "Click Image & Wait & Come back this page to Get Link"
+    )
+    # Fancy mathematical-bold unicode is normalized (NFKC) and still detected.
+    assert html_utils.is_image_gate("𝗖𝗹𝗶𝗰𝗸 𝗢𝗻 𝗔𝗻𝘆 ☝ 𝗜𝗺𝗮𝗴𝗲𝘀 👇 𝘁𝗵𝗲𝗻 𝗯𝗮𝗰𝗸")
+    assert not html_utils.is_image_gate("A normal article about business loans")
+
+    # The instruction label must NOT be clicked as a get-link control ...
+    assert html_utils.choose_continue([{
+        "text": "👇 Click Image & Wait & Come back this page to Get Link - Download",
+        "tag": "a", "handle": 1,
+    }]) is None
+    # ... but a fancy-unicode "Get Link" button IS recognized.
+    assert html_utils.is_reveal_control({"text": "𝗚𝗲𝘁 𝗟𝗶𝗻𝗸", "tag": "button"})
+    print("PASS test_image_gate_detection_and_instruction_rejection")
+
+
 def test_wordpress_archive_links_not_clicked():
     from adlinkfly_bypasser import html_utils
 
@@ -596,7 +626,16 @@ class _WpSafelinkFakeAdapter:
     def wait_idle(self):
         pass
 
-    def switch_latest_tab(self):
+    def handle_new_tabs(self):
+        pass
+
+    def close_popups(self):
+        pass
+
+    def click_image_ad(self):
+        return False
+
+    def back(self):
         pass
 
     def quit(self):
@@ -793,6 +832,7 @@ if __name__ == "__main__":
     test_walk_algorithm_with_fake_adapter()
     test_browser_walk_returns_final_terabox_link()
     test_wpsafelink_keywords_recognised()
+    test_image_gate_detection_and_instruction_rejection()
     test_wordpress_archive_links_not_clicked()
     test_walk_wpsafelink_double_click_generate()
     test_followed_walk_without_final_raises()

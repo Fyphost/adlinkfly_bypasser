@@ -245,8 +245,18 @@ sites too — you don't need Cloudflare to be present.
 The walker understands common plugin flows, including **WPSafelink /
 Shortxlinks** (Human-Verification → Generate Link → Download Link). It clicks
 the human-verification control, handles buttons that need **more than one
-click** (e.g. a "Generate link" that requires two clicks), and follows through
-to the final download link.
+click**, normalizes stylish-unicode button text (e.g. `𝗚𝗲𝘁 𝗟𝗶𝗻𝗸`), skips
+WordPress nav/author/instruction links, and closes ad pop-up tabs (while
+following a new tab if it holds the real link).
+
+### "Click an image, wait, come back" ad gates
+
+Some lockers gate the link behind *"click an image, wait, then come back to get
+the link"*. The solver detects this and makes a best-effort attempt (click an ad
+image, close the pop-up, wait out the timer, then take the revealed link). These
+gates are deliberately anti-automation, so success isn't guaranteed — if it
+can't get through, run **`--headful`** (a visible browser, no `--xvfb`) and
+complete that single image-click by hand; the tool will carry on from there.
 
 ### Option B — manual cookie escape hatch
 

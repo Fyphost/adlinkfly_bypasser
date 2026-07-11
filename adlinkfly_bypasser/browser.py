@@ -205,6 +205,7 @@ class _DrissionAdapter:
             except Exception:  # noqa: BLE001
                 pass
         self._page = ChromiumPage(co)
+        self._main_id = _safe(lambda: self._page.tab_id, default=None)
 
     def goto(self, url):
         self._page.get(url)
@@ -262,10 +263,50 @@ class _DrissionAdapter:
     def wait_idle(self):
         _safe(lambda: self._page.wait.doc_loaded(timeout=15))
 
-    def switch_latest_tab(self):
-        latest = _safe(lambda: self._page.latest_tab, default=None)
-        if latest is not None and latest is not self._page:
-            self._page = latest
+    def handle_new_tabs(self):
+        """If a click opened new tabs: switch to one holding the final link,
+        otherwise close the pop-ups (ads) and stay on the main tab."""
+        ids = _safe(lambda: list(self._page.tab_ids), default=[]) or []
+        if len(ids) <= 1:
+            return
+        for tid in ids:
+            url = _safe(lambda t=tid: self._page.get_tab(t).url, default="")
+            if html_utils.is_final_link(url):
+                tab = _safe(lambda t=tid: self._page.get_tab(t), default=None)
+                if tab is not None:
+                    self._page = tab
+                    self._main_id = tid
+                break
+        self.close_popups()
+
+    def close_popups(self):
+        ids = _safe(lambda: list(self._page.tab_ids), default=[]) or []
+        if len(ids) <= 1:
+            return
+        main = self._main_id if self._main_id in ids else ids[-1]
+        for tid in ids:
+            if tid != main:
+                _safe(lambda t=tid: self._page.get_tab(t).close())
+        tab = _safe(lambda: self._page.get_tab(main), default=None)
+        if tab is not None:
+            self._page = tab
+        _safe(lambda: self._page.set.activate())
+
+    def click_image_ad(self):
+        for sel in ("css:.entry-content a img", "css:article a img",
+                    "css:.post-content a img", "css:a img", "css:img"):
+            el = _safe(lambda s=sel: self._page.ele(s, timeout=1), default=None)
+            if el:
+                try:
+                    el.click()
+                    return True
+                except Exception:  # noqa: BLE001
+                    _safe(lambda: el.click(by_js=True))
+                    return True
+        return False
+
+    def back(self):
+        _safe(lambda: self._page.back())
 
     def quit(self):
         _safe(lambda: self._page.quit())
@@ -280,6 +321,7 @@ class _SeleniumAdapter:
         self._solver = solver
         self._driver = driver
         self._By = By
+        self._main = _safe(lambda: driver.current_window_handle, default=None)
 
     def goto(self, url):
         d = self._driver
@@ -352,13 +394,48 @@ class _SeleniumAdapter:
     def wait_idle(self):
         time.sleep(1.0)
 
-    def switch_latest_tab(self):
-        try:
-            handles = self._driver.window_handles
-            if len(handles) > 1:
-                self._driver.switch_to.window(handles[-1])
-        except Exception:  # noqa: BLE001
-            pass
+    def handle_new_tabs(self):
+        handles = _safe(lambda: self._driver.window_handles, default=[]) or []
+        if len(handles) <= 1:
+            return
+        for h in handles:
+            _safe(lambda hh=h: self._driver.switch_to.window(hh))
+            if html_utils.is_final_link(self.current_url()):
+                self._main = h
+                break
+        self.close_popups()
+
+    def close_popups(self):
+        handles = _safe(lambda: self._driver.window_handles, default=[]) or []
+        if len(handles) <= 1:
+            return
+        main = self._main if self._main in handles else handles[0]
+        for h in handles:
+            if h != main:
+                _safe(lambda hh=h: (self._driver.switch_to.window(hh),
+                                    self._driver.close()))
+        _safe(lambda: self._driver.switch_to.window(main))
+
+    def click_image_ad(self):
+        for sel in (".entry-content a img", "article a img",
+                    ".post-content a img", "a img", "img"):
+            els = _safe(
+                lambda s=sel: self._driver.find_elements(self._By.CSS_SELECTOR, s),
+                default=[],
+            ) or []
+            for el in els:
+                try:
+                    if el.is_displayed():
+                        el.click()
+                        return True
+                except Exception:  # noqa: BLE001
+                    _safe(lambda e=el: self._driver.execute_script(
+                        "arguments[0].click();", e))
+                    return True
+        return False
+
+    def back(self):
+        _safe(lambda: self._driver.back())
 
     def quit(self):
         _safe(lambda: self._driver.quit())
@@ -429,10 +506,37 @@ class _PlaywrightAdapter:
     def wait_idle(self):
         _safe(lambda: self._page.wait_for_load_state("domcontentloaded", timeout=15000))
 
-    def switch_latest_tab(self):
+    def handle_new_tabs(self):
         pages = _safe(lambda: self._context.pages, default=[]) or []
-        if len(pages) > 1:
-            self._page = pages[-1]
+        if len(pages) <= 1:
+            return
+        for p in pages:
+            if html_utils.is_final_link(_safe(lambda pp=p: pp.url, default="")):
+                self._page = p
+                break
+        self.close_popups()
+
+    def close_popups(self):
+        pages = _safe(lambda: self._context.pages, default=[]) or []
+        if len(pages) <= 1:
+            return
+        keep = self._page if self._page in pages else pages[0]
+        for p in pages:
+            if p is not keep:
+                _safe(lambda pp=p: pp.close())
+        self._page = keep
+
+    def click_image_ad(self):
+        for sel in (".entry-content a img", "article a img",
+                    ".post-content a img", "a img", "img"):
+            el = _safe(lambda s=sel: self._page.query_selector(s), default=None)
+            if el:
+                _safe(lambda: el.click(timeout=4000))
+                return True
+        return False
+
+    def back(self):
+        _safe(lambda: self._page.go_back())
 
     def quit(self):
         _safe(lambda: self._browser.close())
@@ -611,6 +715,7 @@ class BrowserSolver:
     def _walk(self, adapter, html, cleared):
         click_counts = {}  # signature -> times clicked ON THIS PAGE
         visited = []  # ordered URLs seen (for loop detection)
+        gated = set()  # URLs whose "click an image" gate we've already handled
         stuck = 0
         last_url = None
         hop_timeout = min(self.timeout, 25)
@@ -638,6 +743,17 @@ class BrowserSolver:
 
             # Wait out the page countdown so the real button/link appears.
             self._wait_countdown(adapter)
+
+            # "Click an image, wait, come back to get the link" ad gate: satisfy
+            # it once per page (click an ad image, close the pop-up, wait).
+            if cur not in gated and html_utils.is_image_gate(adapter.page_html() or ""):
+                gated.add(cur)
+                self._satisfy_image_gate(adapter)
+                final = html_utils.find_final_link(adapter.page_html() or "")
+                if final:
+                    self._log("Found final file-host link after image gate: %s", final)
+                    return self._capture(adapter, adapter.page_html(), final=final,
+                                         cleared=cleared, reached=True, ended="final_link")
 
             # Is this the LAST ad page? (It references a file-host, e.g. a
             # Terabox preview thumbnail.) If so, wait harder for the real
@@ -682,7 +798,7 @@ class BrowserSolver:
                 self._log("Click failed: %s", exc)
                 continue
             adapter.wait_idle()
-            adapter.switch_latest_tab()
+            adapter.handle_new_tabs()
 
             final, progressed = self._wait_progress(adapter, before_url, before_len, hop_timeout)
             if final:
@@ -713,6 +829,25 @@ class BrowserSolver:
             final, reached = cur, True
         return self._capture(adapter, page_html, final=final, cleared=cleared,
                              reached=reached, ended="final_link" if reached else ended)
+
+    def _satisfy_image_gate(self, adapter) -> bool:
+        """Handle the "click an ad image, wait, come back" gate: click an image
+        (opening an ad), close the pop-up/return to the page, then wait so the
+        real Get Link/Download control activates."""
+        self._log("Image gate detected - clicking an ad image and returning")
+        before = adapter.current_url()
+        if not adapter.click_image_ad():
+            self._log("No ad image found to click for the gate")
+            return False
+        time.sleep(2)
+        adapter.close_popups()
+        # If the main tab itself navigated to the ad, go back.
+        if adapter.current_url() and adapter.current_url() != before:
+            adapter.back()
+            adapter.wait_idle()
+        self._wait_countdown(adapter)
+        time.sleep(3)
+        return True
 
     def _wait_countdown(self, adapter) -> None:
         html = adapter.page_html() or ""
