@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adlinkfly-bypasser"
+version = "1.0.0"
+description = "Resolve the destination behind adlinkfly-based short URLs."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "adlinkfly_bypasser contributors" }]
+keywords = ["adlinkfly", "url-shortener", "bypass", "gplinks", "droplink", "scraper"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Internet :: WWW/HTTP",
+]
+# Core package has ZERO required dependencies; it runs on the standard library.
+dependencies = []
+
+[project.optional-dependencies]
+# Recommended for real-world use: better anti-bot handling.
+enhanced = ["cloudscraper>=1.2.60", "requests>=2.25.0", "beautifulsoup4>=4.9.0"]
+
+[project.scripts]
+adlinkfly-bypass = "adlinkfly_bypasser.cli:main"
+
+[project.urls]
+Repository = "https://github.com/Fyphost/adlinkfly_bypasser"
+
+[tool.setuptools.packages.find]
+include = ["adlinkfly_bypasser*"]

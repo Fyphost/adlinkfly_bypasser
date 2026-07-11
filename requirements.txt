@@ -1,0 +1,10 @@
+# The core package runs with ZERO third-party dependencies (standard library only).
+#
+# These optional packages are strongly recommended for real-world sites, which
+# often sit behind Cloudflare or other anti-bot layers:
+#
+#   pip install -r requirements.txt
+#
+cloudscraper>=1.2.60
+requests>=2.25.0
+beautifulsoup4>=4.9.0
