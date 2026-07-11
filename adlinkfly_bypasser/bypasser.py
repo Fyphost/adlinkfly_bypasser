@@ -96,11 +96,19 @@ class AdlinkflyBypasser:
         backend: str = "auto",
         cookies: Optional[dict] = None,
         headers: Optional[dict] = None,
+        solver: object = "none",
+        headless: bool = True,
         verbose: bool = False,
     ):
         self.wait = wait
         self.wait_cap = wait_cap
         self.verbose = verbose
+        self.user_agent = user_agent
+        self.headless = headless
+        # solver: "none" | "browser" | "auto" | a browser backend name | an
+        # object exposing .solve(url) -> SolveResult (for custom/test solvers).
+        self.solver_spec = solver
+        self._solver = None
         self._session_kwargs = {"timeout": timeout, "backend": backend}
         if user_agent:
             self._session_kwargs["user_agent"] = user_agent
@@ -124,16 +132,28 @@ class AdlinkflyBypasser:
         trail: List[str] = [url]
         current = url
         method_used = ""
+        pending_html: Optional[str] = None
+        pending_url: Optional[str] = None
 
         for step in range(1, _MAX_STEPS + 1):
-            self._log("Step %d: GET %s", step, current)
-            resp = self.session.get(current)
-            html = resp.text
-            page_url = resp.url or current
+            if pending_html is not None:
+                # Page already rendered by the browser solver; don't re-fetch.
+                html, page_url = pending_html, pending_url or current
+                status: Optional[int] = 200
+                pending_html = pending_url = None
+            else:
+                self._log("Step %d: GET %s", step, current)
+                resp = self.session.get(current)
+                html = resp.text
+                page_url = resp.url or current
+                status = resp.status_code
 
-            # Detect anti-bot pages up front so we can give a precise error
-            # instead of a misleading "no destination found".
-            self._raise_if_cloudflare(html, resp.status_code)
+            # Anti-bot handling: try the browser solver if enabled, otherwise
+            # raise a precise error instead of a misleading "no destination".
+            if html_utils.detect_cloudflare(html, status):
+                if self._can_solve():
+                    html, page_url = self._solve_cloudflare(current, page_url)
+                self._raise_if_cloudflare(html, status)
 
             resolved, method = self._resolve_page(page_url, html)
             if resolved is None:
@@ -172,6 +192,58 @@ class AdlinkflyBypasser:
             trail=trail,
         )
 
+    # -- browser solver ----------------------------------------------------
+    def _can_solve(self) -> bool:
+        return self.solver_spec not in (None, "none", "off", False)
+
+    def _get_solver(self):
+        if self._solver is not None:
+            return self._solver
+        spec = self.solver_spec
+        if hasattr(spec, "solve"):  # a pre-built / custom / mock solver
+            self._solver = spec
+            return self._solver
+
+        from .browser import BrowserSolver  # lazy: browser deps are optional
+
+        backend = "auto" if spec in ("browser", "auto", True) else str(spec)
+        self._solver = BrowserSolver(
+            backend=backend,
+            headless=self.headless,
+            user_agent=self.user_agent,
+            verbose=self.verbose,
+        )
+        return self._solver
+
+    def _solve_cloudflare(self, request_url: str, page_url: str):
+        """Use the browser solver to clear Cloudflare, then adopt its cookies.
+
+        Returns ``(html, page_url)`` for the resolver to continue with. On
+        failure, raises :class:`CloudflareChallengeError`.
+        """
+        self._log("Invoking browser solver for %s", request_url)
+        solver = self._get_solver()
+        try:
+            result = solver.solve(request_url)
+        except CloudflareChallengeError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - surface as a CF error
+            raise CloudflareChallengeError(
+                f"Browser solver failed to clear Cloudflare: {exc}",
+                reason="challenge",
+            ) from exc
+
+        # Adopt the browser's cf_clearance cookie + User-Agent so the remaining
+        # plain-HTTP steps (e.g. the /links/go POST) are accepted.
+        self.session.update_credentials(
+            cookies=getattr(result, "cookies", None),
+            user_agent=getattr(result, "user_agent", None),
+        )
+        html = getattr(result, "html", "") or ""
+        final_url = getattr(result, "final_url", None) or page_url
+        self._log("Browser solver returned %d bytes (url=%s)", len(html), final_url)
+        return html, final_url
+
     # -- anti-bot detection ------------------------------------------------
     def _raise_if_cloudflare(self, html: str, status_code: Optional[int]) -> None:
         reason = html_utils.detect_cloudflare(html, status_code)
@@ -180,6 +252,7 @@ class AdlinkflyBypasser:
 
         self._log("Cloudflare protection detected: %s", reason)
         using_cf = self.session.backend == "cloudscraper"
+        solver_tried = self._can_solve()
 
         if reason == "blocked":
             raise CloudflareChallengeError(
@@ -192,18 +265,28 @@ class AdlinkflyBypasser:
                 reason=reason,
             )
 
-        hint = (
-            "Install and use cloudscraper (pip install cloudscraper, then "
-            "backend='cloudscraper')."
-            if not using_cf
-            else (
-                "cloudscraper could not clear this challenge (it does not solve "
-                "Turnstile / interactive managed challenges). Solve the "
-                "challenge once in a real browser, then pass the resulting "
-                "'cf_clearance' cookie plus the SAME user_agent to the "
-                "bypasser (cookies={'cf_clearance': '...'}, user_agent='...')."
+        if solver_tried:
+            hint = (
+                "The browser solver ran but the challenge did not clear. "
+                "Retry with a visible browser (headless=False / --headful), "
+                "increase the solver timeout, or solve it manually once and "
+                "pass the resulting 'cf_clearance' cookie + matching user_agent."
             )
-        )
+        elif not using_cf:
+            hint = (
+                "Use the browser solver to clear it automatically "
+                "(solver='browser' / --solver browser, after e.g. "
+                "pip install DrissionPage), or try backend='cloudscraper'."
+            )
+        else:
+            hint = (
+                "cloudscraper could not clear this challenge (it does not solve "
+                "Turnstile / interactive managed challenges). Use the browser "
+                "solver (solver='browser' / --solver browser, e.g. "
+                "pip install DrissionPage), or solve it once in a real browser "
+                "and pass the resulting 'cf_clearance' cookie plus the SAME "
+                "user_agent (cookies={'cf_clearance': '...'}, user_agent='...')."
+            )
         raise CloudflareChallengeError(
             f"Cloudflare {reason} detected. The server returned a Cloudflare "
             "challenge page instead of an adlinkfly page, so the destination "

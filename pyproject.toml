@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "adlinkfly-bypasser"
-version = "1.1.0"
+version = "1.2.0"
 description = "Resolve the destination behind adlinkfly-based short URLs."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -23,6 +23,12 @@ dependencies = []
 [project.optional-dependencies]
 # Recommended for real-world use: better anti-bot handling.
 enhanced = ["cloudscraper>=1.2.60", "requests>=2.25.0", "beautifulsoup4>=4.9.0"]
+# Real-browser solver for Cloudflare managed / Turnstile challenges. Pick ONE
+# driver; DrissionPage is the recommended default.
+browser = ["DrissionPage>=4.0.0"]
+browser-seleniumbase = ["seleniumbase>=4.20.0"]
+browser-undetected = ["undetected-chromedriver>=3.5.0", "selenium>=4.10.0"]
+browser-playwright = ["playwright>=1.40.0"]
 
 [project.scripts]
 adlinkfly-bypass = "adlinkfly_bypasser.cli:main"

@@ -118,10 +118,51 @@ resolved. ...
 ```
 
 `cloudscraper` can clear the older JavaScript ("I'm Under Attack") challenge,
-but it does **not** solve interactive Turnstile / managed challenges. For those,
-use the **cookie escape hatch**: solve the challenge once in a real browser,
-copy the `cf_clearance` cookie *and the exact User-Agent* your browser used,
-and hand both to the bypasser.
+but it does **not** solve interactive Turnstile / managed challenges. You have
+two ways to get past those:
+
+### Option A — automatic browser solver (recommended)
+
+Install a real-browser driver and let the tool clear the challenge for you. It
+drives Chromium, waits for Cloudflare to pass, grabs the `cf_clearance` cookie +
+User-Agent, and then finishes the adlinkfly flow over plain HTTP automatically.
+
+```bash
+pip install DrissionPage          # recommended driver (also: seleniumbase,
+                                  # undetected-chromedriver, playwright)
+```
+
+```bash
+# CLI
+adlinkfly-bypass --solver browser https://some-cf-protected-shortener/abc123
+
+# If headless gets detected, use a visible window:
+adlinkfly-bypass --solver browser --headful https://some-cf-protected-shortener/abc123
+```
+
+```python
+from adlinkfly_bypasser import AdlinkflyBypasser
+
+bp = AdlinkflyBypasser(solver="browser", headless=False, verbose=True)
+print(bp.bypass("https://some-cf-protected-shortener/abc123").destination)
+```
+
+Supported drivers (auto-detected; force one with `--solver drissionpage|seleniumbase|undetected|playwright`):
+
+| Driver | Install | Notes |
+|--------|---------|-------|
+| DrissionPage | `pip install DrissionPage` | CDP-based, most reliable vs Cloudflare |
+| SeleniumBase (UC) | `pip install seleniumbase` | UC mode + CAPTCHA-click helpers |
+| undetected-chromedriver | `pip install undetected-chromedriver selenium` | patched Chromedriver |
+| Playwright | `pip install playwright && playwright install chromium` | last resort |
+
+Requires a Chrome/Chromium install on the machine. Headless is easier to detect —
+if a site won't clear, run `--headful`.
+
+### Option B — manual cookie escape hatch
+
+Solve the challenge once in a real browser, copy the `cf_clearance` cookie *and
+the exact User-Agent* your browser used, and hand both to the bypasser.
 
 ```python
 from adlinkfly_bypasser import AdlinkflyBypasser

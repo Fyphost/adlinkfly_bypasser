@@ -8,3 +8,10 @@
 cloudscraper>=1.2.60
 requests>=2.25.0
 beautifulsoup4>=4.9.0
+
+
+# To clear Cloudflare managed / Turnstile challenges automatically, also
+# install ONE browser driver and run with --solver browser:
+#
+#   pip install DrissionPage            # recommended
+#   # or: seleniumbase / undetected-chromedriver+selenium / playwright

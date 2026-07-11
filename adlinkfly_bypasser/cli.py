@@ -60,6 +60,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip the interstitial countdown entirely (fastest).",
     )
     parser.add_argument(
+        "-s",
+        "--solver",
+        default="none",
+        metavar="SOLVER",
+        help="Cloudflare solver: 'none' (default), 'browser'/'auto' (use the "
+        "first installed browser driver), or a specific driver name "
+        "(drissionpage|seleniumbase|undetected|playwright). Requires the "
+        "corresponding package, e.g. pip install DrissionPage.",
+    )
+    parser.add_argument(
+        "--headful",
+        action="store_true",
+        help="Run the browser solver with a visible window (more likely to "
+        "clear Cloudflare than headless).",
+    )
+    parser.add_argument(
         "-t", "--timeout", type=int, default=20, help="Per-request timeout in seconds."
     )
     parser.add_argument(
@@ -134,6 +150,8 @@ def main(argv=None) -> int:
         backend=args.backend,
         cookies=cookies or None,
         headers=headers or None,
+        solver=args.solver,
+        headless=not args.headful,
         verbose=args.verbose,
     )
 

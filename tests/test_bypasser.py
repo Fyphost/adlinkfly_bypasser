@@ -90,6 +90,31 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(400, '{"status":"error"}', content_type="application/json")
 
 
+class _MockSolver:
+    """A stand-in for BrowserSolver: pretends a browser cleared Cloudflare.
+
+    Returns a rendered adlinkfly interstitial plus a cf_clearance cookie, which
+    is exactly what a real browser solve would hand back.
+    """
+
+    def __init__(self, html, cookies=None, user_agent="Mozilla/5.0 Solved"):
+        from adlinkfly_bypasser import SolveResult
+
+        self._result = SolveResult(
+            html=html,
+            cookies=cookies or {"cf_clearance": "browser-solved-token"},
+            user_agent=user_agent,
+            final_url=None,
+        )
+        self.calls = 0
+
+    def solve(self, url):
+        self.calls += 1
+        # Reflect the requested URL as the final URL.
+        self._result.final_url = url
+        return self._result
+
+
 def _start_server():
     server = HTTPServer(("127.0.0.1", 0), _Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -182,6 +207,67 @@ def test_cf_clearance_cookie_escape_hatch():
         server.shutdown()
 
 
+def test_browser_solver_clears_cloudflare_end_to_end():
+    """A (mock) browser solver clears CF, then the normal resolver finishes."""
+    server = _start_server()
+    try:
+        solver = _MockSolver(INTERSTITIAL_HTML)
+        bp = AdlinkflyBypasser(wait=0, backend="urllib", solver=solver)
+        result = bp.bypass(_base(server) + "/guarded/abc")
+        assert result.destination == DESTINATION, result.destination
+        assert solver.calls == 1, solver.calls
+        print("PASS test_browser_solver_clears_cloudflare_end_to_end ->", result.destination)
+    finally:
+        server.shutdown()
+
+
+def test_browser_solver_that_fails_raises():
+    """If the solver returns a page that's still a challenge, raise clearly."""
+    from adlinkfly_bypasser import CloudflareChallengeError
+
+    server = _start_server()
+    try:
+        solver = _MockSolver(CLOUDFLARE_HTML)  # never actually clears
+        bp = AdlinkflyBypasser(wait=0, backend="urllib", solver=solver)
+        try:
+            bp.bypass(_base(server) + "/cf/abc")
+        except CloudflareChallengeError as exc:
+            assert "did not clear" in str(exc) or "challenge" in str(exc).lower()
+            print("PASS test_browser_solver_that_fails_raises")
+            return
+        raise AssertionError("expected CloudflareChallengeError")
+    finally:
+        server.shutdown()
+
+
+def test_browser_backend_selection_without_libs():
+    """With no browser driver installed, selecting one errors clearly."""
+    from adlinkfly_bypasser import BrowserSolver, BrowserSolverError, available_backends
+
+    if available_backends():
+        print("SKIP test_browser_backend_selection_without_libs (a driver is installed)")
+        return
+    try:
+        BrowserSolver(backend="auto")
+    except BrowserSolverError as exc:
+        assert "No browser backend" in str(exc)
+        print("PASS test_browser_backend_selection_without_libs")
+        return
+    raise AssertionError("expected BrowserSolverError")
+
+
+def test_solver_disabled_by_default():
+    server = _start_server()
+    try:
+        bp = AdlinkflyBypasser(wait=0, backend="urllib")  # solver defaults to "none"
+        assert bp._can_solve() is False
+        bp2 = AdlinkflyBypasser(wait=0, backend="urllib", solver="browser")
+        assert bp2._can_solve() is True
+        print("PASS test_solver_disabled_by_default")
+    finally:
+        server.shutdown()
+
+
 def test_detect_cloudflare_unit():
     from adlinkfly_bypasser import html_utils
 
@@ -229,4 +315,8 @@ if __name__ == "__main__":
     test_unresolvable_raises()
     test_cloudflare_challenge_raises()
     test_cf_clearance_cookie_escape_hatch()
+    test_solver_disabled_by_default()
+    test_browser_backend_selection_without_libs()
+    test_browser_solver_clears_cloudflare_end_to_end()
+    test_browser_solver_that_fails_raises()
     print("\nAll tests passed.")

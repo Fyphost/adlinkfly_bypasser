@@ -24,6 +24,12 @@ Advanced usage::
     print(result.destination)
 """
 
+from .browser import (
+    BrowserSolver,
+    BrowserSolverError,
+    SolveResult,
+    available_backends,
+)
 from .bypasser import AdlinkflyBypasser, BypassResult, bypass
 from .exceptions import (
     AdlinkflyBypassError,
@@ -38,6 +44,10 @@ __all__ = [
     "AdlinkflyBypasser",
     "BypassResult",
     "bypass",
+    "BrowserSolver",
+    "SolveResult",
+    "BrowserSolverError",
+    "available_backends",
     "AdlinkflyBypassError",
     "CloudflareChallengeError",
     "NetworkError",
@@ -46,4 +56,4 @@ __all__ = [
     "UnsupportedURLError",
 ]
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"

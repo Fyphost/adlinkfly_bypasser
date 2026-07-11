@@ -81,10 +81,33 @@ class Session:
             except Exception:
                 pass
         else:  # urllib: injected via a Cookie header on each request
-            self.default_headers.setdefault(
-                "Cookie",
-                "; ".join(f"{k}={v}" for k, v in self.cookies.items()),
+            self.default_headers["Cookie"] = "; ".join(
+                f"{k}={v}" for k, v in self.cookies.items()
             )
+
+    def update_credentials(
+        self,
+        cookies: Optional[Dict[str, str]] = None,
+        user_agent: Optional[str] = None,
+    ) -> None:
+        """Merge in cookies / a new User-Agent mid-session.
+
+        Used after a browser solver clears a Cloudflare challenge, to adopt the
+        ``cf_clearance`` cookie and the exact browser User-Agent so subsequent
+        plain-HTTP requests are accepted.
+        """
+        if user_agent:
+            self.user_agent = user_agent
+            if self.backend in ("cloudscraper", "requests"):
+                try:
+                    self._impl.headers.update({"User-Agent": user_agent})
+                except Exception:
+                    pass
+        if cookies:
+            self.cookies.update(cookies)
+            # Rebuild from the full cookie set so the urllib Cookie header and
+            # the requests cookie jar both reflect every cookie we hold.
+            self._apply_cookies()
 
     # -- backend selection -------------------------------------------------
     def _select_backend(self, backend: str):
