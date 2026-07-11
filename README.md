@@ -100,7 +100,62 @@ cat links.txt | adlinkfly-bypass -
 ```
 
 Key flags: `-b/--backend`, `-w/--wait SECONDS`, `--no-wait`, `-t/--timeout`,
-`-u/--user-agent`, `--json`, `-v/--verbose`.
+`-u/--user-agent`, `-c/--cookie NAME=VALUE`, `-H/--header NAME:VALUE`,
+`--json`, `-v/--verbose`.
+
+## Cloudflare-protected shorteners
+
+Some shorteners (e.g. sites fronted by a Cloudflare **managed challenge** or
+**Turnstile**) never serve the adlinkfly page to a plain HTTP client — they
+return a challenge/"Just a moment" page first. `adlinkfly_bypasser` detects
+this and raises a precise `CloudflareChallengeError` instead of a vague
+"could not find a destination" message:
+
+```
+Cloudflare turnstile detected. The server returned a Cloudflare challenge
+page instead of an adlinkfly page, so the destination URL could not be
+resolved. ...
+```
+
+`cloudscraper` can clear the older JavaScript ("I'm Under Attack") challenge,
+but it does **not** solve interactive Turnstile / managed challenges. For those,
+use the **cookie escape hatch**: solve the challenge once in a real browser,
+copy the `cf_clearance` cookie *and the exact User-Agent* your browser used,
+and hand both to the bypasser.
+
+```python
+from adlinkfly_bypasser import AdlinkflyBypasser
+
+bp = AdlinkflyBypasser(
+    backend="cloudscraper",
+    user_agent="Mozilla/5.0 ...",          # MUST match the browser that solved it
+    cookies={"cf_clearance": "<value-from-browser>"},
+)
+print(bp.bypass("https://some-cf-protected-shortener/abc123").destination)
+```
+
+```bash
+adlinkfly-bypass -b cloudscraper \
+  -u "Mozilla/5.0 ..." \
+  -c "cf_clearance=<value-from-browser>" \
+  https://some-cf-protected-shortener/abc123
+```
+
+> `cf_clearance` is bound to your IP **and** User-Agent, and it expires. If it
+> stops working, solve the challenge again and refresh the cookie. Fully
+> automating Turnstile requires a real browser engine (e.g. Playwright /
+> undetected-chromedriver), which is out of scope for this HTTP-based tool.
+
+Catch it specifically if you want to branch on it:
+
+```python
+from adlinkfly_bypasser import bypass, CloudflareChallengeError
+
+try:
+    print(bypass("https://some-cf-protected-shortener/abc123"))
+except CloudflareChallengeError as e:
+    print("Blocked by Cloudflare:", e.reason)   # e.g. "turnstile", "blocked"
+```
 
 ## Options reference
 
@@ -115,7 +170,8 @@ Key flags: `-b/--backend`, `-w/--wait SECONDS`, `--no-wait`, `-t/--timeout`,
 
 - Sites that require a real JavaScript engine, solving a CAPTCHA, or an
   interactive challenge cannot be resolved by a pure HTTP client. For heavy
-  Cloudflare protection, install the `enhanced` extras.
+  Cloudflare protection, install the `enhanced` extras and/or use the
+  `cf_clearance` cookie escape hatch described above.
 - Shortener sites change their markup often; the fallback strategies aim to
   keep things working, but a specific site may still need tweaks.
 - Respect each site's Terms of Service and applicable law. This tool is provided

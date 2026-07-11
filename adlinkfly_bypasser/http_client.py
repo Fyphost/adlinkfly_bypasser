@@ -61,10 +61,30 @@ class Session:
         user_agent: str = DEFAULT_USER_AGENT,
         timeout: int = 20,
         backend: str = "auto",
+        cookies: Optional[Dict[str, str]] = None,
+        default_headers: Optional[Dict[str, str]] = None,
     ):
         self.user_agent = user_agent
         self.timeout = timeout
+        self.cookies = dict(cookies) if cookies else {}
+        self.default_headers = dict(default_headers) if default_headers else {}
         self.backend, self._impl = self._select_backend(backend)
+        self._apply_cookies()
+
+    def _apply_cookies(self) -> None:
+        """Seed session cookies (e.g. a browser-obtained ``cf_clearance``)."""
+        if not self.cookies:
+            return
+        if self.backend in ("cloudscraper", "requests"):
+            try:
+                self._impl.cookies.update(self.cookies)
+            except Exception:
+                pass
+        else:  # urllib: injected via a Cookie header on each request
+            self.default_headers.setdefault(
+                "Cookie",
+                "; ".join(f"{k}={v}" for k, v in self.cookies.items()),
+            )
 
     # -- backend selection -------------------------------------------------
     def _select_backend(self, backend: str):
@@ -119,6 +139,8 @@ class Session:
     # -- dispatch ----------------------------------------------------------
     def _request(self, method, url, data=None, headers=None):
         merged = {"User-Agent": self.user_agent}
+        if self.default_headers:
+            merged.update(self.default_headers)
         if headers:
             merged.update(headers)
 

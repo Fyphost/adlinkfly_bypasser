@@ -33,6 +33,18 @@ META_REFRESH_HTML = """
 </head><body>redirecting...</body></html>
 """ % DESTINATION
 
+# A representative Cloudflare "managed challenge" / Turnstile interstitial.
+CLOUDFLARE_HTML = """
+<!doctype html><html><head><title>Just a moment...</title>
+<script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1"></script>
+</head><body>
+<div class="cf-turnstile"></div>
+<script>window._cf_chl_opt={cvId:'3'};</script>
+<p>Verify you are human by completing the action below.</p>
+<link rel="stylesheet" href="/cf-fonts/inter.css">
+</body></html>
+"""
+
 
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # silence
@@ -51,6 +63,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, INTERSTITIAL_HTML)
         elif self.path.startswith("/meta"):
             self._send(200, META_REFRESH_HTML)
+        elif self.path.startswith("/cf"):
+            # Always a Cloudflare challenge.
+            self._send(403, CLOUDFLARE_HTML)
+        elif self.path.startswith("/guarded"):
+            # Serve the real page only if a cf_clearance cookie is present,
+            # otherwise a challenge - mirroring the escape-hatch workflow.
+            cookie = self.headers.get("Cookie", "")
+            if "cf_clearance=" in cookie:
+                self._send(200, INTERSTITIAL_HTML)
+            else:
+                self._send(403, CLOUDFLARE_HTML)
         else:
             self._send(404, "not found")
 
@@ -117,6 +140,69 @@ def test_unresolvable_raises():
         server.shutdown()
 
 
+def test_cloudflare_challenge_raises():
+    from adlinkfly_bypasser import CloudflareChallengeError
+
+    server = _start_server()
+    try:
+        bp = AdlinkflyBypasser(wait=0, backend="urllib")
+        try:
+            bp.bypass(_base(server) + "/cf/abc")
+        except CloudflareChallengeError as exc:
+            assert exc.reason in ("turnstile", "managed challenge"), exc.reason
+            assert "Cloudflare" in str(exc)
+            print("PASS test_cloudflare_challenge_raises ->", exc.reason)
+            return
+        raise AssertionError("expected CloudflareChallengeError")
+    finally:
+        server.shutdown()
+
+
+def test_cf_clearance_cookie_escape_hatch():
+    server = _start_server()
+    try:
+        # Without the cookie -> challenge.
+        bp_no = AdlinkflyBypasser(wait=0, backend="urllib")
+        from adlinkfly_bypasser import CloudflareChallengeError
+
+        try:
+            bp_no.bypass(_base(server) + "/guarded/abc")
+            raise AssertionError("expected challenge without cookie")
+        except CloudflareChallengeError:
+            pass
+
+        # With a cf_clearance cookie -> real page resolves.
+        bp_yes = AdlinkflyBypasser(
+            wait=0, backend="urllib", cookies={"cf_clearance": "solved-token"}
+        )
+        result = bp_yes.bypass(_base(server) + "/guarded/abc")
+        assert result.destination == DESTINATION, result.destination
+        print("PASS test_cf_clearance_cookie_escape_hatch ->", result.destination)
+    finally:
+        server.shutdown()
+
+
+def test_detect_cloudflare_unit():
+    from adlinkfly_bypasser import html_utils
+
+    assert html_utils.detect_cloudflare(CLOUDFLARE_HTML) in (
+        "turnstile",
+        "managed challenge",
+    )
+    # A normal adlinkfly page must NOT be flagged as a challenge.
+    assert html_utils.detect_cloudflare(INTERSTITIAL_HTML) is None
+    # A page that merely loads cf-fonts is not a challenge.
+    assert html_utils.detect_cloudflare('<link href="/cf-fonts/x.css">') is None
+    # A bare 403 with no body reads as a block.
+    assert html_utils.detect_cloudflare("", status_code=403) == "blocked"
+    # An explicit block page.
+    assert (
+        html_utils.detect_cloudflare("<h1>Sorry, you have been blocked</h1>")
+        == "blocked"
+    )
+    print("PASS test_detect_cloudflare_unit")
+
+
 def test_countdown_autodetect():
     from adlinkfly_bypasser import html_utils
 
@@ -137,7 +223,10 @@ def test_form_parsing():
 if __name__ == "__main__":
     test_form_parsing()
     test_countdown_autodetect()
+    test_detect_cloudflare_unit()
     test_links_go_post_flow()
     test_meta_refresh_flow()
     test_unresolvable_raises()
+    test_cloudflare_challenge_raises()
+    test_cf_clearance_cookie_escape_hatch()
     print("\nAll tests passed.")

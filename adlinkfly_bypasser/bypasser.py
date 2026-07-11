@@ -27,6 +27,7 @@ from urllib.parse import urljoin, urlparse
 
 from . import html_utils
 from .exceptions import (
+    CloudflareChallengeError,
     ResolutionError,
     UnsupportedURLError,
 )
@@ -75,6 +76,13 @@ class AdlinkflyBypasser:
     backend:
         Force an HTTP backend: ``"auto"`` (default), ``"cloudscraper"``,
         ``"requests"`` or ``"urllib"``.
+    cookies:
+        Optional cookies to seed the session with. The primary use is to pass
+        a ``cf_clearance`` cookie obtained from a real browser after solving a
+        Cloudflare challenge - together with the *same* ``user_agent`` the
+        browser used - to get past Cloudflare-protected shorteners.
+    headers:
+        Optional default headers applied to every request.
     verbose:
         Emit progress via the ``adlinkfly_bypasser`` logger at INFO level.
     """
@@ -86,6 +94,8 @@ class AdlinkflyBypasser:
         timeout: int = 20,
         user_agent: Optional[str] = None,
         backend: str = "auto",
+        cookies: Optional[dict] = None,
+        headers: Optional[dict] = None,
         verbose: bool = False,
     ):
         self.wait = wait
@@ -94,6 +104,10 @@ class AdlinkflyBypasser:
         self._session_kwargs = {"timeout": timeout, "backend": backend}
         if user_agent:
             self._session_kwargs["user_agent"] = user_agent
+        if cookies:
+            self._session_kwargs["cookies"] = cookies
+        if headers:
+            self._session_kwargs["default_headers"] = headers
         self.session = Session(**self._session_kwargs)
 
     # -- public API --------------------------------------------------------
@@ -116,6 +130,10 @@ class AdlinkflyBypasser:
             resp = self.session.get(current)
             html = resp.text
             page_url = resp.url or current
+
+            # Detect anti-bot pages up front so we can give a precise error
+            # instead of a misleading "no destination found".
+            self._raise_if_cloudflare(html, resp.status_code)
 
             resolved, method = self._resolve_page(page_url, html)
             if resolved is None:
@@ -152,6 +170,45 @@ class AdlinkflyBypasser:
             steps=_MAX_STEPS,
             method=method_used,
             trail=trail,
+        )
+
+    # -- anti-bot detection ------------------------------------------------
+    def _raise_if_cloudflare(self, html: str, status_code: Optional[int]) -> None:
+        reason = html_utils.detect_cloudflare(html, status_code)
+        if not reason:
+            return
+
+        self._log("Cloudflare protection detected: %s", reason)
+        using_cf = self.session.backend == "cloudscraper"
+
+        if reason == "blocked":
+            raise CloudflareChallengeError(
+                "Cloudflare blocked the request (firewall / IP block). The "
+                "server returned a Cloudflare block page instead of the "
+                "shortener page, so the destination could not be resolved. "
+                "This is not solvable by waiting; try a different network/IP, "
+                "or supply a valid 'cf_clearance' cookie and matching "
+                "user_agent from a browser session.",
+                reason=reason,
+            )
+
+        hint = (
+            "Install and use cloudscraper (pip install cloudscraper, then "
+            "backend='cloudscraper')."
+            if not using_cf
+            else (
+                "cloudscraper could not clear this challenge (it does not solve "
+                "Turnstile / interactive managed challenges). Solve the "
+                "challenge once in a real browser, then pass the resulting "
+                "'cf_clearance' cookie plus the SAME user_agent to the "
+                "bypasser (cookies={'cf_clearance': '...'}, user_agent='...')."
+            )
+        )
+        raise CloudflareChallengeError(
+            f"Cloudflare {reason} detected. The server returned a Cloudflare "
+            "challenge page instead of an adlinkfly page, so the destination "
+            f"URL could not be resolved. {hint}",
+            reason=reason,
         )
 
     # -- page resolution ---------------------------------------------------

@@ -27,6 +27,7 @@ Advanced usage::
 from .bypasser import AdlinkflyBypasser, BypassResult, bypass
 from .exceptions import (
     AdlinkflyBypassError,
+    CloudflareChallengeError,
     NetworkError,
     ParseError,
     ResolutionError,
@@ -38,10 +39,11 @@ __all__ = [
     "BypassResult",
     "bypass",
     "AdlinkflyBypassError",
+    "CloudflareChallengeError",
     "NetworkError",
     "ParseError",
     "ResolutionError",
     "UnsupportedURLError",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

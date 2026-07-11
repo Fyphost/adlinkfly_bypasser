@@ -66,6 +66,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "-u", "--user-agent", default=None, help="Override the User-Agent string."
     )
     parser.add_argument(
+        "-c",
+        "--cookie",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Add a cookie (repeatable). Use this to pass a browser-obtained "
+        "'cf_clearance' cookie to get past Cloudflare; also pass the same "
+        "--user-agent the browser used.",
+    )
+    parser.add_argument(
+        "-H",
+        "--header",
+        action="append",
+        default=[],
+        metavar="NAME:VALUE",
+        help="Add a default request header (repeatable).",
+    )
+    parser.add_argument(
         "--json", action="store_true", help="Emit JSON results instead of plain URLs."
     )
     parser.add_argument(
@@ -75,6 +93,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
     return parser
+
+
+def _parse_pairs(items: List[str], sep: str, label: str) -> dict:
+    """Parse repeated ``NAME<sep>VALUE`` CLI args into a dict."""
+    out: dict = {}
+    for item in items:
+        if sep not in item:
+            raise SystemExit(f"Invalid {label} (expected NAME{sep}VALUE): {item!r}")
+        name, value = item.split(sep, 1)
+        out[name.strip()] = value.strip()
+    return out
 
 
 def _collect_urls(raw: List[str]) -> List[str]:
@@ -96,11 +125,15 @@ def main(argv=None) -> int:
         )
 
     wait = 0.0 if args.no_wait else args.wait
+    cookies = _parse_pairs(args.cookie, sep="=", label="cookie")
+    headers = _parse_pairs(args.header, sep=":", label="header")
     bypasser = AdlinkflyBypasser(
         wait=wait,
         timeout=args.timeout,
         user_agent=args.user_agent,
         backend=args.backend,
+        cookies=cookies or None,
+        headers=headers or None,
         verbose=args.verbose,
     )
 

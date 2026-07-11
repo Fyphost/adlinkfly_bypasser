@@ -133,3 +133,83 @@ def find_countdown_seconds(html: str) -> Optional[int]:
             if 0 < value <= 120:
                 best = value if best is None else max(best, value)
     return best
+
+
+# -- Cloudflare protection detection --------------------------------------
+
+# Markers that strongly indicate an interactive Cloudflare challenge (JS / IUAM
+# / managed challenge / Turnstile) rather than the real destination page.
+_CF_CHALLENGE_MARKERS = (
+    "/cdn-cgi/challenge-platform",
+    "window._cf_chl_opt",
+    "cf_chl_opt",
+    "cf-browser-verification",
+    "cf-challenge-running",
+    "challenges.cloudflare.com/turnstile",
+    "cf-turnstile",
+    "__cf_chl_",
+    "turnstile",
+)
+
+# Human-readable phrases seen on Cloudflare interstitials.
+_CF_CHALLENGE_PHRASES = (
+    "just a moment",
+    "verify you are human",
+    "checking your browser before accessing",
+    "enable javascript and cookies to continue",
+    "needs to review the security of your connection",
+)
+
+# Markers/phrases that indicate an outright Cloudflare *block* (not solvable by
+# waiting - usually IP/firewall based).
+_CF_BLOCK_PHRASES = (
+    "sorry, you have been blocked",
+    "attention required",
+    "you have been blocked",
+    "error 1020",  # access denied (firewall rule)
+    "access denied",
+)
+
+
+def detect_cloudflare(html: str, status_code: Optional[int] = None) -> Optional[str]:
+    """Detect a Cloudflare protection page.
+
+    Returns a short reason string describing what was found
+    (``"managed challenge"``, ``"turnstile"``, ``"javascript challenge"``,
+    ``"blocked"``), or ``None`` if the page does not look like a Cloudflare
+    interstitial.
+
+    The heuristic deliberately avoids false positives: many normal pages load
+    Cloudflare *assets* (e.g. ``/cf-fonts/``, ``cdnjs``) without being a
+    challenge, so those alone are not treated as a challenge.
+    """
+    if not html:
+        # A bare 403 with no body is very likely a Cloudflare block.
+        if status_code == 403:
+            return "blocked"
+        return None
+
+    low = html.lower()
+
+    # A real destination page (adlinkfly interstitial) has a form/inputs; if we
+    # can already see the go-link markers, it's not a challenge.
+    if ("go-link" in low) or ("/links/go" in low) or ('name="_token"' in low):
+        return None
+
+    is_challenge = any(marker.lower() in low for marker in _CF_CHALLENGE_MARKERS)
+    has_phrase = any(phrase in low for phrase in _CF_CHALLENGE_PHRASES)
+    is_block = any(phrase in low for phrase in _CF_BLOCK_PHRASES)
+
+    if is_block and not is_challenge:
+        return "blocked"
+
+    if is_challenge or (has_phrase and "cloudflare" in low):
+        if "turnstile" in low:
+            return "turnstile"
+        if "cf_chl_opt" in low or "_cf_chl_opt" in low or "__cf_chl_" in low:
+            return "managed challenge"
+        if "cf-browser-verification" in low or "checking your browser" in low:
+            return "javascript challenge"
+        return "managed challenge"
+
+    return None
