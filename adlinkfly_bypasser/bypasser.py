@@ -346,6 +346,14 @@ class AdlinkflyBypasser:
 
         # 5) A followed ad-walk that got stuck / looped / hit max hops.
         if self.follow:
+            if ended == "blocked_or_stale":
+                raise ResolutionError(
+                    "The site returned an error/stub page (e.g. a 'Reload Page' "
+                    "screen) instead of the ad flow. The link may be expired, or "
+                    f"the site is rate-limiting/blocking this IP. Last page: {final or '?'}. "
+                    "Wait a while and retry, try a different network/IP, or run "
+                    "with --headful to see what the page shows."
+                )
             raise ResolutionError(
                 "Walked the ad-page chain but could not reach a final "
                 f"file-host link (ended: {ended or 'unknown'}). Last page: "

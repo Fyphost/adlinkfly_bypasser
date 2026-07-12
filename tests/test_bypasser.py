@@ -484,6 +484,9 @@ class _FakeAdapter:
     def back(self):
         pass
 
+    def reload(self):
+        pass
+
     def quit(self):
         pass
 
@@ -679,6 +682,9 @@ class _WpSafelinkFakeAdapter:
     def back(self):
         pass
 
+    def reload(self):
+        pass
+
     def quit(self):
         pass
 
@@ -700,6 +706,77 @@ def test_walk_wpsafelink_double_click_generate():
     assert result.reached_final is True
     assert adapter.gen_clicks == 2, adapter.gen_clicks  # clicked Generate twice
     print("PASS test_walk_wpsafelink_double_click_generate ->", result.final_url)
+
+
+class _ReloadFakeAdapter:
+    """First serves a 'Reload Page' error stub; after a reload it shows the
+    real link (models a transient rate-limit / error page)."""
+
+    def __init__(self):
+        self.reloads = 0
+
+    def goto(self, url):
+        pass
+
+    def current_url(self):
+        return "https://vplink.in/x"
+
+    def page_html(self):
+        if self.reloads >= 1:
+            return '<a href="https://terabox.com/s/1AfterReload">go</a>'
+        return "<html><body>Reload Page</body></html>"
+
+    def get_cookies(self):
+        return {"cf_clearance": "t"}
+
+    def get_user_agent(self):
+        return "UA"
+
+    def candidates(self):
+        return [{"text": "Reload Page", "tag": "button", "handle": "r"}]
+
+    def click(self, handle):
+        pass
+
+    def wait_idle(self):
+        pass
+
+    def handle_new_tabs(self):
+        pass
+
+    def close_popups(self):
+        pass
+
+    def click_image_ad(self):
+        return False
+
+    def back(self):
+        pass
+
+    def reload(self):
+        self.reloads += 1
+
+    def quit(self):
+        pass
+
+
+def test_walk_reloads_on_error_page():
+    from adlinkfly_bypasser.browser import BrowserSolver
+
+    solver = BrowserSolver.__new__(BrowserSolver)
+    solver.verbose = False
+    solver.poll = 0.01
+    solver.timeout = 1
+    solver.settle = 0
+    solver.max_hops = 6
+    solver.time_budget = 30
+    solver.user_agent = None
+
+    adapter = _ReloadFakeAdapter()
+    result = solver._walk(adapter, "", cleared=True)
+    assert result.final_url == "https://terabox.com/s/1AfterReload", result.final_url
+    assert adapter.reloads >= 1
+    print("PASS test_walk_reloads_on_error_page ->", result.final_url)
 
 
 def test_followed_walk_without_final_raises():
@@ -878,6 +955,7 @@ if __name__ == "__main__":
     test_image_gate_detection_and_instruction_rejection()
     test_wordpress_archive_links_not_clicked()
     test_walk_wpsafelink_double_click_generate()
+    test_walk_reloads_on_error_page()
     test_followed_walk_without_final_raises()
     test_browser_fallback_when_http_resolution_fails()
     test_pick_form_rejects_wordpress_comment_form()

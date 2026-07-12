@@ -308,6 +308,9 @@ class _DrissionAdapter:
     def back(self):
         _safe(lambda: self._page.back())
 
+    def reload(self):
+        _safe(lambda: self._page.refresh())
+
     def quit(self):
         _safe(lambda: self._page.quit())
 
@@ -437,6 +440,9 @@ class _SeleniumAdapter:
     def back(self):
         _safe(lambda: self._driver.back())
 
+    def reload(self):
+        _safe(lambda: self._driver.refresh())
+
     def quit(self):
         _safe(lambda: self._driver.quit())
 
@@ -537,6 +543,9 @@ class _PlaywrightAdapter:
 
     def back(self):
         _safe(lambda: self._page.go_back())
+
+    def reload(self):
+        _safe(lambda: self._page.reload())
 
     def quit(self):
         _safe(lambda: self._browser.close())
@@ -719,6 +728,7 @@ class BrowserSolver:
         visited = []  # ordered URLs seen (for loop detection)
         gated = set()  # URLs whose "click an image" gate we've already handled
         stuck = 0
+        reloads = 0
         last_url = None
         hop_timeout = min(self.timeout, 25)
         deadline = time.time() + getattr(self, "time_budget", 150)
@@ -755,6 +765,17 @@ class BrowserSolver:
                 self._log("Found embedded final link: %s", early)
                 return self._capture(adapter, adapter.page_html(), final=early,
                                      cleared=cleared, reached=True, ended="final_link")
+
+            # Error/stub page ("Reload Page", browser net error, empty body):
+            # the site likely rate-limited us or the link is stale. Reload and
+            # retry a couple of times before giving up.
+            if reloads < 2 and self._is_error_page(adapter):
+                reloads += 1
+                self._log("Page looks like an error/reload stub; reloading (%d/2)", reloads)
+                adapter.reload()
+                time.sleep(3)
+                self._wait_cleared_adapter(adapter)
+                continue
 
             # Wait out the page countdown so the real button/link appears.
             self._wait_countdown(adapter)
@@ -794,7 +815,7 @@ class BrowserSolver:
                 reveal_only=on_final_page,
             )
             if cand is None:
-                ended = "no_controls"
+                ended = "blocked_or_stale" if self._is_error_page(adapter) else "no_controls"
                 self._log("No usable continue/get-link control. Controls: %s", self._labels(adapter))
                 self._log_page_markers(adapter)
                 break
@@ -945,6 +966,19 @@ class BrowserSolver:
         page_html = adapter.page_html() or ""
         changed = abs(len(page_html) - before_len) > 400
         return None, changed
+
+    _ERROR_PAGE_MARKERS = (
+        "reload page", "try again", "isn't working", "took too long",
+        "err_", "this site can", "refused to connect", "no internet",
+        "aw, snap", "rate limit", "too many requests", "429", "access denied",
+    )
+
+    def _is_error_page(self, adapter) -> bool:
+        html = adapter.page_html() or ""
+        if len(html) >= 15000:
+            return False
+        low = html.lower()
+        return any(m in low for m in self._ERROR_PAGE_MARKERS)
 
     def _labels(self, adapter):
         out = []
