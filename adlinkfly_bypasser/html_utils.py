@@ -358,6 +358,45 @@ def _valid_final_url(url: str) -> bool:
     return True
 
 
+# Social / community "join us" hosts. A link to one of these found by loose
+# scraping (anchors/JS/meta) is almost always a "Join our Telegram/WhatsApp"
+# decoy button on the interstitial, not the shortened destination.
+_SOCIAL_HOSTS = (
+    "t.me",
+    "telegram.me",
+    "telegram.org",
+    "telegram.dog",
+    "chat.whatsapp.com",
+    "wa.me",
+    "whatsapp.com",
+    "discord.gg",
+    "discord.com",
+    "discordapp.com",
+    "facebook.com",
+    "fb.com",
+    "fb.me",
+    "twitter.com",
+    "x.com",
+    "instagram.com",
+    "youtube.com",
+    "youtu.be",
+    "pinterest.com",
+    "reddit.com",
+    "linkedin.com",
+)
+
+
+def is_social_url(url: str) -> bool:
+    """True if *url* points at a social/community site (a likely 'join us'
+    decoy rather than the shortened destination)."""
+    if not url:
+        return False
+    if url.lower().startswith("tg://"):
+        return True
+    host = _host_of(url)
+    return any(host == h or host.endswith("." + h) for h in _SOCIAL_HOSTS)
+
+
 def is_final_link(url: str) -> bool:
     """True if *url* is a genuine final destination link (file-host, valid,
     and not a thumbnail/preview/viewer asset)."""

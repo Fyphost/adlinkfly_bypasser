@@ -433,20 +433,24 @@ class AdlinkflyBypasser:
 
         # Strategy 3: meta refresh redirect.
         dest = html_utils.find_meta_refresh(html)
-        if dest:
+        if dest and not self._is_social(dest, page_url):
             return dest, "meta_refresh"
 
         # Strategy 4: JavaScript location assignment.
         dest = html_utils.find_js_redirect(html)
-        if dest and self._looks_external(dest, page_url):
+        if dest and self._looks_external(dest, page_url) and not self._is_social(dest, page_url):
             return dest, "js_redirect"
 
         # Strategy 5: an obvious action anchor (Get Link / Download / ...).
         dest = html_utils.find_action_anchor(html)
-        if dest and self._looks_external(dest, page_url):
+        if dest and self._looks_external(dest, page_url) and not self._is_social(dest, page_url):
             return dest, "anchor"
 
         return None, ""
+
+    def _is_social(self, candidate: str, page_url: str) -> bool:
+        """True if the candidate is a social/community 'join us' decoy link."""
+        return html_utils.is_social_url(urljoin(page_url, candidate))
 
     def _try_go_post(self, page_url: str, html: str) -> Optional[str]:
         forms = html_utils.parse_forms(html)
@@ -511,7 +515,7 @@ class AdlinkflyBypasser:
             except Exception:  # noqa: BLE001
                 continue
             dest = self._extract_url_from_response(resp.text, json_only=True)
-            if dest and self._looks_external(dest, page_url):
+            if dest and self._looks_external(dest, page_url) and not self._is_social(dest, page_url):
                 return dest
         return None
 

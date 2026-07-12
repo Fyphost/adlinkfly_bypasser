@@ -355,6 +355,26 @@ def test_find_any_final_link_lenient():
     print("PASS test_find_any_final_link_lenient")
 
 
+def test_social_links_rejected():
+    from adlinkfly_bypasser import html_utils
+    from adlinkfly_bypasser.bypasser import AdlinkflyBypasser
+
+    # "Join our Telegram/WhatsApp" decoys are social links.
+    assert html_utils.is_social_url("https://t.me/+SDtA6sDThtwzN2Rl")
+    assert html_utils.is_social_url("https://chat.whatsapp.com/ABC")
+    assert html_utils.is_social_url("tg://join?invite=x")
+    assert not html_utils.is_social_url("https://terabox.com/s/1abc")
+    assert not html_utils.is_social_url("https://drive.google.com/file/d/x")
+
+    # A "Get Link" anchor pointing at a Telegram group must NOT be returned as
+    # the destination (regression: vplink.in returned its t.me group URL).
+    bp = AdlinkflyBypasser(backend="urllib")
+    html = '<a class="btn get-link" href="https://t.me/+SDtA6sDThtwzN2Rl">Get Link</a>'
+    resolved, method = bp._resolve_page("https://vplink.in/x", html)
+    assert resolved is None, (resolved, method)
+    print("PASS test_social_links_rejected")
+
+
 def test_is_final_link_validation():
     from adlinkfly_bypasser import html_utils
 
@@ -942,6 +962,7 @@ if __name__ == "__main__":
     test_cf_clearance_cookie_escape_hatch()
     test_solver_disabled_by_default()
     test_is_final_host()
+    test_social_links_rejected()
     test_is_final_link_validation()
     test_find_any_final_link_lenient()
     test_find_final_link()
