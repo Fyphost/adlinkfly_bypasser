@@ -20,6 +20,7 @@ longer on the shortener's own domain.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -334,12 +335,16 @@ class AdlinkflyBypasser:
         if self._looks_like_interstitial(html):
             return None
 
-        # 4) Off-domain, non-interstitial landing reached by a clean stop ->
-        #    the browser followed the chain to the destination; accept it.
+        # 4) Off-domain, non-interstitial landing. Only accept this as the
+        #    destination when NOT following an ad-walk (e.g. a Cloudflare-only
+        #    solve that landed straight on the target), and never accept an
+        #    error/404 page. In follow mode an off-domain blog/ad page is just
+        #    another ad hop, not the destination - so we fall through to (5).
         if (
             final
+            and not self.follow
             and self._left_domain(source, final)
-            and (not self.follow or ended in self._CLEAN_ENDINGS)
+            and not self._is_error_or_notfound(html)
         ):
             trail.append(final)
             return BypassResult(source, final, step, "browser_redirect", trail)
@@ -687,6 +692,31 @@ class AdlinkflyBypasser:
             return False
         low = html.lower()
         return any(marker.lower() in low for marker in _INTERSTITIAL_MARKERS)
+
+    @staticmethod
+    def _is_error_or_notfound(html: str) -> bool:
+        """True if the page is a 404 / error / block page (never a destination)."""
+        if not html:
+            return True
+        low = html.lower()
+        markers = (
+            "page not found",
+            "page can't be found",
+            "page can\u2019t be found",
+            "nothing was found at this location",
+            "404 not found",
+            "error 404",
+            "not found",
+            "you have been blocked",
+            "access denied",
+            "too many requests",
+        )
+        # Prefer the <title> when available (avoids matching article prose).
+        m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+        title = (m.group(1).lower() if m else "")
+        if any(k in title for k in ("not found", "404", "error", "blocked", "denied")):
+            return True
+        return any(k in low for k in markers[:6])
 
     def _log(self, msg, *args) -> None:
         if self.verbose:

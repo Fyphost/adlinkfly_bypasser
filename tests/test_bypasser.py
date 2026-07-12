@@ -295,16 +295,18 @@ def test_solver_disabled_by_default():
 
 
 def test_browser_redirect_to_destination_not_misparsed():
-    """Regression: browser clears CF and lands on the destination blog page.
+    """Regression: a Cloudflare-only solve (follow=False) that lands on the
+    destination page must return that URL, NOT scrape the WordPress comment
+    form / OpenGraph namespace (which previously yielded ogp.me/ns).
 
-    The resolver must return that landing URL, NOT scrape the WordPress
-    comment form / OpenGraph namespace (which previously yielded ogp.me/ns).
+    (In follow mode, an off-domain non-file landing is treated as just another
+    ad hop and is not returned - see test_followed_walk_without_final_raises.)
     """
     server = _start_server()
     try:
         landing = "https://blogsite.example/studyeducates/ai-degree-2026/"
         solver = _MockSolver(WORDPRESS_LANDING_HTML, final_url=landing)
-        bp = AdlinkflyBypasser(wait=0, backend="urllib", solver=solver)
+        bp = AdlinkflyBypasser(wait=0, backend="urllib", solver=solver, follow=False)
         result = bp.bypass(_base(server) + "/cf/p1B2")
         assert result.destination == landing, result.destination
         assert result.method == "browser_redirect", result.method
@@ -823,6 +825,27 @@ def test_followed_walk_without_final_raises():
         server.shutdown()
 
 
+def test_error_page_not_returned_as_destination():
+    """A 404/'Page Not Found' landing must never be returned as the answer."""
+    from adlinkfly_bypasser import ResolutionError
+
+    server = _start_server()
+    try:
+        notfound = ("<html><head><title>Page Not Found - BC Sakhi</title></head>"
+                    "<body>Oops! That page can't be found.</body></html>")
+        solver = _MockSolver(notfound, final_url="https://bcsakhi.in/eduonline/",
+                             ended="no_controls")
+        bp = AdlinkflyBypasser(wait=0, backend="urllib", solver=solver, follow=True)
+        try:
+            bp.bypass(_base(server) + "/cf/p1B2")
+        except ResolutionError:
+            print("PASS test_error_page_not_returned_as_destination")
+            return
+        raise AssertionError("expected ResolutionError for a 404 landing page")
+    finally:
+        server.shutdown()
+
+
 def test_browser_fallback_when_http_resolution_fails():
     """A non-Cloudflare page with no adlinkfly form should fall back to the
     browser solver, which walks to the final link."""
@@ -978,6 +1001,7 @@ if __name__ == "__main__":
     test_walk_wpsafelink_double_click_generate()
     test_walk_reloads_on_error_page()
     test_followed_walk_without_final_raises()
+    test_error_page_not_returned_as_destination()
     test_browser_fallback_when_http_resolution_fails()
     test_pick_form_rejects_wordpress_comment_form()
     test_extract_url_rejects_junk()

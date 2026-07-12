@@ -781,16 +781,14 @@ class BrowserSolver:
             # Wait out the page countdown so the real button/link appears.
             self._wait_countdown(adapter)
 
-            # "Click an image, wait, come back to get the link" ad gate: satisfy
-            # it once per page (click an ad image, close the pop-up, wait).
+            # "Click an image, wait, come back" ad gate: note it, but do NOT
+            # auto-click arbitrary page images - that navigates to random
+            # ad/404 pages and derails the flow. We rely on the real advance
+            # control ("Continue"/"Get Link") instead; a true image-view gate
+            # needs --headful manual assist.
             if cur not in gated and html_utils.is_image_gate(adapter.page_html() or ""):
                 gated.add(cur)
-                self._satisfy_image_gate(adapter)
-                final = self._find_final(adapter.page_html() or "")
-                if final:
-                    self._log("Found final file-host link after image gate: %s", final)
-                    return self._capture(adapter, adapter.page_html(), final=final,
-                                         cleared=cleared, reached=True, ended="final_link")
+                self._log("Image-gate instruction present (not auto-clicking; may need --headful)")
 
             # Is this the LAST ad page? (It references a file-host, e.g. a
             # Terabox preview thumbnail.) If so, wait harder for the real
