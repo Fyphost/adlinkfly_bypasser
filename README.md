@@ -306,12 +306,40 @@ except CloudflareChallengeError as e:
 | `timeout`     | `20`    | Per-request timeout (seconds)                                       |
 | `user_agent`  | Chrome  | Override the browser User-Agent                                    |
 
+## What works reliably vs. what needs manual assist
+
+| Link type | Support | Notes |
+|-----------|---------|-------|
+| Standard adlinkfly (`/links/go` JSON) | ✅ Full | Plain HTTP; no browser needed |
+| Cloudflare "Just a moment" / IUAM | ✅ With browser solver | `--solver browser` (or `cloudscraper`) |
+| Cloudflare **Turnstile / managed** challenge | ✅ With browser + Xvfb | `--solver browser --xvfb`; headed clears best |
+| Meta-refresh / JS-redirect shorteners | ✅ Full | |
+| Multi-page blog hops → Terabox/Drive | ✅ Usually | Walks pages; returns embedded file link |
+| **WPSafelink / Shortxlinks** (human-verify → generate) | ✅ Usually | `--solver browser`; clicks through the plugin flow |
+| Pages that **embed** the Terabox/Drive link | ✅ Fast path | Surfaced immediately, incl. preview references |
+| **"Click an image, wait, come back"** ad gates | ⚠️ Best-effort | Deliberately anti-bot; may need `--headful` |
+| Randomized **ad-maze** lockers (bounce through ad sites) | ⚠️ Often not headless | Use `--headful` and complete the one ad-click yourself |
+| Sites rate-limiting / blocking your IP | ❌ | Retries reload; otherwise wait, change network, or `--headful` |
+
+For the ⚠️ cases, run a **visible** browser and do the single required ad-click
+by hand — the tool waits and continues from there:
+
+```bash
+adlinkfly-bypass --solver browser --headful -v <url>
+```
+(Use `--headful` instead of `--xvfb`; needs a desktop/VNC session, or run it on
+your local machine rather than a headless server.)
+
 ## Notes & limitations
 
 - Sites that require a real JavaScript engine, solving a CAPTCHA, or an
   interactive challenge cannot be resolved by a pure HTTP client. For heavy
   Cloudflare protection, install the `enhanced` extras and/or use the
   `cf_clearance` cookie escape hatch described above.
+- "View this ad image and come back" gates and randomized ad-maze lockers are
+  engineered specifically to defeat automation. The solver makes a genuine
+  attempt (and a total time budget stops runaway walks), but these may require
+  `--headful` manual assist.
 - Shortener sites change their markup often; the fallback strategies aim to
   keep things working, but a specific site may still need tweaks.
 - Respect each site's Terms of Service and applicable law. This tool is provided
