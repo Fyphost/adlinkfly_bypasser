@@ -536,7 +536,9 @@ _CONTROL_RULES = (
     ("word", "i am human", True),
     ("word", "click to verify", True),
     ("word", "click here to verify", True),
-    ("word", "verify", True),
+    # NOTE: bare "verify" is deliberately NOT matched - fake buttons like
+    # "Verify Boardroom Clearance" / "Verify Endowment Limits" are ad decoys
+    # that navigate to ad sites. Only the specific phrases above are real.
     ("id", "getlink", True),
     ("id", "get-link", True),
     ("id", "get_link", True),

@@ -590,7 +590,7 @@ class BrowserSolver:
         headless: bool = True,
         follow: bool = True,
         max_hops: int = 25,
-        time_budget: int = 150,
+        time_budget: int = 210,
         timeout: int = 60,
         poll: float = 2.0,
         settle: float = 3.0,
@@ -838,7 +838,7 @@ class BrowserSolver:
             adapter.wait_idle()
             adapter.handle_new_tabs()
 
-            final, progressed = self._wait_progress(adapter, before_url, before_len, hop_timeout)
+            final, progressed = self._wait_progress(adapter, before_url, before_len, min(hop_timeout, 8))
             if final:
                 self._log("Found final file-host link after click: %s", final)
                 return self._capture(adapter, adapter.page_html(), final=final,
@@ -850,10 +850,13 @@ class BrowserSolver:
                 if looping:
                     self._log("Revisited a page (ad loop) at hop %d", hop)
                 self._log("No forward progress after click (stuck=%d)", stuck)
-                # Give JS / countdowns a moment - the same control may need
-                # another click (e.g. WPSafelink "Generate" wants two clicks).
-                time.sleep(min(3, hop_timeout))
-                if stuck >= 5:
+                # The real advance button is often gated behind a countdown
+                # (e.g. 'click to verify' / 'Get Link' only appear after the
+                # timer). Wait it out, then the loop re-scans and picks the
+                # newly-revealed higher-priority control.
+                if not self._wait_countdown(adapter):
+                    time.sleep(6)  # no parseable timer; give JS a moment anyway
+                if stuck >= 6:
                     ended = "loop" if looping else "stuck"
                     self._log("Giving up walk (%s). Controls: %s", ended, self._labels(adapter))
                     break
@@ -887,17 +890,19 @@ class BrowserSolver:
         time.sleep(3)
         return True
 
-    def _wait_countdown(self, adapter) -> None:
+    def _wait_countdown(self, adapter) -> int:
+        """Wait out a page countdown if one is detectable. Returns seconds slept."""
         html = adapter.page_html() or ""
         secs = html_utils.find_countdown_seconds(html) or 0
-        # Many safelink pages show a "please wait" with a timer we can't parse;
-        # fall back to a sensible default so the real button has time to appear.
+        # Many pages show a "please wait" with a timer we can't parse; fall back
+        # to a sensible default so the real button has time to appear.
         if not secs and re.search(r"please\s*wait", html, re.IGNORECASE):
-            secs = 8
-        secs = min(secs, 25)
+            secs = 10
+        secs = min(secs, 20)
         if secs > 0:
             self._log("Waiting %ds for page countdown", secs)
             time.sleep(secs + 1)
+        return secs
 
     def _wait_for_continue(self, adapter, exclude=None, timeout=None, reveal_only=False):
         """Return the best advance control (Continue / Verify / Click to Verify
