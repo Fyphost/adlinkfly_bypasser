@@ -99,9 +99,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-hops",
         type=int,
-        default=12,
+        default=25,
         metavar="N",
-        help="Max ad pages the browser solver clicks through (default: 12).",
+        help="Max ad pages the browser solver clicks through (default: 25).",
     )
     parser.add_argument(
         "-t", "--timeout", type=int, default=20, help="Per-request timeout in seconds."

@@ -589,7 +589,7 @@ class BrowserSolver:
         backend: str = "auto",
         headless: bool = True,
         follow: bool = True,
-        max_hops: int = 12,
+        max_hops: int = 25,
         time_budget: int = 150,
         timeout: int = 60,
         poll: float = 2.0,
@@ -730,7 +730,7 @@ class BrowserSolver:
         stuck = 0
         reloads = 0
         last_url = None
-        hop_timeout = min(self.timeout, 25)
+        hop_timeout = min(self.timeout, 12)
         deadline = time.time() + getattr(self, "time_budget", 150)
         ended = "max_hops"
 
@@ -778,8 +778,10 @@ class BrowserSolver:
                 self._wait_cleared_adapter(adapter)
                 continue
 
-            # Wait out the page countdown so the real button/link appears.
-            self._wait_countdown(adapter)
+            # NOTE: we deliberately do NOT wait out the page countdown. These
+            # "Continue / Verify / Click to Verify / Get Link" buttons work when
+            # clicked immediately; waiting the 8-15s timers just burns the time
+            # budget. Click instantly and move on.
 
             # "Click an image, wait, come back" ad gate: note it, but do NOT
             # auto-click arbitrary page images - that navigates to random
@@ -898,32 +900,19 @@ class BrowserSolver:
             time.sleep(secs + 1)
 
     def _wait_for_continue(self, adapter, exclude=None, timeout=None, reveal_only=False):
-        """Poll for a "Continue / Get Link" control.
-
-        A real reveal button (get-link/download/generate) is taken immediately.
-        A plain "Continue" is only used after a short grace period, to give a
-        higher-priority reveal button a chance to appear first - but we never
-        block for the whole timeout when a usable control already exists.
-
-        With *reveal_only* (used on the final ad page), a plain "Continue" is
-        ignored entirely - only a genuine reveal/get-link button is returned -
-        so we don't loop back through more ads.
+        """Return the best advance control (Continue / Verify / Click to Verify
+        / Get Link) as soon as one is present - clicked *instantly*, no
+        countdown grace. ``choose_continue`` already prefers a reveal/get-link
+        button over a plain "Continue". With *reveal_only* (the final ad page),
+        a plain "Continue" is ignored so we don't loop back through more ads.
         """
-        total = timeout or self.timeout
-        deadline = time.time() + total
-        grace_deadline = time.time() + min(5, total)
-        fallback = None
+        deadline = time.time() + (timeout or self.timeout)
         while time.time() < deadline:
             cand = html_utils.choose_continue(adapter.candidates(), exclude=exclude)
-            if cand is not None:
-                if html_utils.is_reveal_control(cand):
-                    return cand  # the actual get-link button - take it now
-                if not reveal_only:
-                    fallback = cand
-                    if time.time() >= grace_deadline:
-                        return fallback
+            if cand is not None and (not reveal_only or html_utils.is_reveal_control(cand)):
+                return cand
             time.sleep(self.poll)
-        return fallback
+        return None
 
     @staticmethod
     def _find_final(html):
