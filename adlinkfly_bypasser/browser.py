@@ -772,6 +772,7 @@ class BrowserSolver:
             if reloads < 2 and self._is_error_page(adapter):
                 reloads += 1
                 self._log("Page looks like an error/reload stub; reloading (%d/2)", reloads)
+                self._log_stub_page(adapter)
                 adapter.reload()
                 time.sleep(3)
                 self._wait_cleared_adapter(adapter)
@@ -818,6 +819,7 @@ class BrowserSolver:
                 ended = "blocked_or_stale" if self._is_error_page(adapter) else "no_controls"
                 self._log("No usable continue/get-link control. Controls: %s", self._labels(adapter))
                 self._log_page_markers(adapter)
+                self._log_stub_page(adapter)
                 break
 
             sig = html_utils.candidate_signature(cand)
@@ -988,6 +990,21 @@ class BrowserSolver:
             if lbl:
                 out.append(lbl[:34])
         return out
+
+    def _log_stub_page(self, adapter):
+        """Log the title + a text snippet of a small/stub page, to reveal what
+        an 'error/Reload Page' block actually is (anti-bot, custom, etc.)."""
+        if not self.verbose:
+            return
+        html = adapter.page_html() or ""
+        m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+        title = (m.group(1).strip()[:150] if m else "")
+        text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html,
+                      flags=re.IGNORECASE | re.DOTALL)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()[:400]
+        self._log("Stub page title=%r", title)
+        self._log("Stub page text=%r", text)
 
     def _log_page_markers(self, adapter):
         """Diagnostic: which link-flow markers / countdown are on the page.
